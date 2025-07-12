@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::fs::{self, File};
+use std::io::Read;
 use std::ptr::{self};
 use winit::raw_window_handle::HasWindowHandle;
 use winit::{self};
@@ -86,7 +88,8 @@ impl winit::application::ApplicationHandler for App {
         self.swapchain_loader = Some(khr::swapchain::Device::new(&self.instance, self.device.as_ref().unwrap()));
         (self.swapchain, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = App::create_swapchain(&self.instance, self.swapchain_loader.as_ref().unwrap(), 100, 100, &self.surface_loader, self.surface, self.physical_device);
         self.swapchain_image_views = App::create_image_views(self.device.as_ref().unwrap(), &self.swapchain_images, self.swapchain_image_format);
-        
+        App::create_graphics_pipeline(self.device.as_ref().unwrap(), self.swapchain_extent);
+        App::create_render_pass();
         self.window = Some(window);
     }
 
@@ -546,6 +549,190 @@ impl App {
 
         swapchain_image_views
     }
+
+    fn create_graphics_pipeline(device: &ash::Device, swapchain_extent: vk::Extent2D) {
+        let vert_bytes: Vec<u8> = fs::read("src/shader.frag.spv").unwrap();
+        let frag_bytes: Vec<u8> = fs::read("src/shader.frag.spv").unwrap();
+
+        let vert_shader: vk::ShaderModule = App::create_shader_module(device, &vert_bytes);
+        let frag_shader: vk::ShaderModule = App::create_shader_module(device, &frag_bytes);
+
+        let vert_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+            s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
+            p_name: c"main".as_ptr(),
+            p_next: ptr::null(),
+            flags: vk::PipelineShaderStageCreateFlags::empty(),
+            stage: vk::ShaderStageFlags::VERTEX,
+            module: vert_shader,
+            p_specialization_info: ptr::null(), // for constexpr's in shader
+            ..Default::default()
+        };
+
+        let frag_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+            s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
+            p_name: c"main".as_ptr(),
+            p_next: ptr::null(),
+            flags: vk::PipelineShaderStageCreateFlags::empty(),
+            stage: vk::ShaderStageFlags::FRAGMENT,
+            module: vert_shader,
+            p_specialization_info: ptr::null(), // for constexpr's in shader
+            ..Default::default()
+        };
+
+        let shader_stages: [vk::PipelineShaderStageCreateInfo; 2] = [vert_shader_stage_info, frag_shader_stage_info];
+
+        let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineVertexInputStateCreateFlags::empty(),
+            vertex_attribute_description_count: 0,
+            p_vertex_attribute_descriptions: ptr::null(),
+            vertex_binding_description_count: 0,
+            p_vertex_binding_descriptions: ptr::null(),
+            ..Default::default()
+        };
+
+        let vertex_input_assembly_state_info = vk::PipelineInputAssemblyStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            flags: vk::PipelineInputAssemblyStateCreateFlags::empty(),
+            p_next: ptr::null(),
+            primitive_restart_enable: vk::FALSE,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            ..Default::default()
+        };
+
+        let viewports: [vk::Viewport; 1] = [
+            vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: swapchain_extent.width as f32,
+                height: swapchain_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }
+        ];
+
+        let scissors = [
+            vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: swapchain_extent,
+            }
+        ];
+
+        let _viewport_state_create_info = vk::PipelineViewportStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineViewportStateCreateFlags::empty(),
+            scissor_count: scissors.len() as u32,
+            p_scissors: scissors.as_ptr(),
+            viewport_count: viewports.len() as u32,
+            p_viewports: viewports.as_ptr(),
+            ..Default::default()
+        };
+
+        let _rasterization_statue_create_info = vk::PipelineRasterizationStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineRasterizationStateCreateFlags::empty(),
+            depth_clamp_enable: vk::FALSE,
+            cull_mode: vk::CullModeFlags::BACK,
+            front_face: vk::FrontFace::CLOCKWISE,
+            line_width: 1.0,
+            polygon_mode: vk::PolygonMode::FILL,
+            rasterizer_discard_enable: vk::FALSE,
+            depth_bias_clamp: 0.0,
+            depth_bias_constant_factor: 0.0,
+            depth_bias_enable: vk::FALSE,
+            depth_bias_slope_factor: 0.0,
+            ..Default::default()
+        };
+        let _multisample_state_create_info = vk::PipelineMultisampleStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            flags: vk::PipelineMultisampleStateCreateFlags::empty(),
+            p_next: ptr::null(),
+            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            sample_shading_enable: vk::FALSE,
+            min_sample_shading: 0.0,
+            p_sample_mask: ptr::null(),
+            alpha_to_one_enable: vk::FALSE,
+            alpha_to_coverage_enable: vk::FALSE,
+            ..Default::default()
+        };
+
+        let stencil_state = vk::StencilOpState {
+            fail_op: vk::StencilOp::KEEP,
+            pass_op: vk::StencilOp::KEEP,
+            depth_fail_op: vk::StencilOp::KEEP,
+            compare_op: vk::CompareOp::ALWAYS,
+            compare_mask: 0,
+            write_mask: 0,
+            reference: 0,
+        };
+
+        let _depth_state_create_info = vk::PipelineDepthStencilStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineDepthStencilStateCreateFlags::empty(),
+            depth_test_enable: vk::FALSE,
+            depth_write_enable: vk::FALSE,
+            depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
+            depth_bounds_test_enable: vk::FALSE,
+            stencil_test_enable: vk::FALSE,
+            front: stencil_state,
+            back: stencil_state,
+            max_depth_bounds: 1.0,
+            min_depth_bounds: 0.0,
+            ..Default::default()
+        };
+
+        let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::FALSE,
+            color_write_mask: vk::ColorComponentFlags::all(),
+            src_color_blend_factor: vk::BlendFactor::ONE,
+            dst_color_blend_factor: vk::BlendFactor::ZERO,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend_factor: vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+            alpha_blend_op: vk::BlendOp::ADD,
+        }];
+
+        let _color_blend_state = vk::PipelineColorBlendStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineColorBlendStateCreateFlags::empty(),
+            logic_op_enable: vk::FALSE,
+            logic_op: vk::LogicOp::COPY,
+            attachment_count: color_blend_attachment_states.len() as u32,
+            p_attachments: color_blend_attachment_states.as_ptr(),
+            blend_constants: [0.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        };
+
+        unsafe {
+            device.destroy_shader_module(vert_shader, None);
+            device.destroy_shader_module(frag_shader, None);
+        }
+    }
+
+    fn create_shader_module(device: &ash::Device, bytes: &Vec<u8>) -> vk::ShaderModule {
+        let shader_module_create_info = vk::ShaderModuleCreateInfo {
+            s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::ShaderModuleCreateFlags::empty(),
+            code_size: bytes.len(),
+            p_code: bytes.as_ptr() as *const u32,
+            ..Default::default()
+        };
+
+        unsafe {
+            device.create_shader_module(&shader_module_create_info, None).unwrap()
+        }
+    }
+
+    fn create_render_pass() {
+
+    }
+
 }
 
 impl Drop for App {
