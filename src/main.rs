@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs::{self};
 use std::ptr::{self};
+use ash::vk::RenderPassCreateFlags;
 use winit::raw_window_handle::HasWindowHandle;
 use winit::{self};
 use ash::{ext, khr, vk};
@@ -75,7 +75,11 @@ struct App {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
-    swapchain_image_views: Vec<vk::ImageView>
+    swapchain_image_views: Vec<vk::ImageView>,
+
+    render_pass: vk::RenderPass,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout
 } 
 
 impl winit::application::ApplicationHandler for App {
@@ -88,8 +92,9 @@ impl winit::application::ApplicationHandler for App {
         self.swapchain_loader = Some(khr::swapchain::Device::new(&self.instance, self.device.as_ref().unwrap()));
         (self.swapchain, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = App::create_swapchain(&self.instance, self.swapchain_loader.as_ref().unwrap(), 100, 100, &self.surface_loader, self.surface, self.physical_device);
         self.swapchain_image_views = App::create_image_views(self.device.as_ref().unwrap(), &self.swapchain_images, self.swapchain_image_format);
-        App::create_graphics_pipeline(self.device.as_ref().unwrap(), self.swapchain_extent);
-        App::create_render_pass();
+        self.render_pass = App::create_render_pass(self.device.as_ref().unwrap(), self.swapchain_image_format);
+        (self.pipeline, self.pipeline_layout) = App::create_graphics_pipeline(self.device.as_ref().unwrap(), self.swapchain_extent, self.render_pass);
+
         self.window = Some(window);
     }
 
@@ -136,7 +141,10 @@ impl App {
             swapchain_images: vec![],
             swapchain_image_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D {width: 0, height: 0},
-            swapchain_image_views: vec![]
+            swapchain_image_views: vec![],
+            render_pass: vk::RenderPass::null(),
+            pipeline: vk::Pipeline::null(),
+            pipeline_layout: vk::PipelineLayout::null(),
         }
     }
 
@@ -495,7 +503,7 @@ impl App {
 
         if indices.graphics != indices.present {
             swapchain_create_info.image_sharing_mode = vk::SharingMode::CONCURRENT;
-            swapchain_create_info.queue_family_index_count = 2;
+            swapchain_create_info.queue_family_index_count = queue_family_indices.len() as u32;
             swapchain_create_info.p_queue_family_indices = queue_family_indices.as_ptr();
         } 
 
@@ -518,7 +526,6 @@ impl App {
         swapchain_image_views.reserve(swapchain_images.len());
 
         for i in 0..swapchain_images.len() {
-            // swapchain_image_views.push();
             let image_view_create_info = vk::ImageViewCreateInfo {
                 s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
                 p_next: ptr::null(),
@@ -549,15 +556,68 @@ impl App {
 
         swapchain_image_views
     }
+    
+    fn create_render_pass(device: &ash::Device, swapchain_image_format: vk::Format) -> vk::RenderPass {
+        let color_attachment = vk::AttachmentDescription {
+            format: swapchain_image_format,
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            samples: vk::SampleCountFlags::TYPE_1, // no multisampling for now
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            // not using stencil buffer for now
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR
+        };
 
-    fn create_graphics_pipeline(device: &ash::Device, swapchain_extent: vk::Extent2D) {
-        let vert_bytes: Vec<u8> = fs::read("src/shader.frag.spv").unwrap();
+        let color_attachment_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        };
+
+        let subpass = vk::SubpassDescription {
+            flags: vk::SubpassDescriptionFlags::empty(),
+            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
+            p_color_attachments: &color_attachment_ref,
+            color_attachment_count: 1,
+            
+            // only using color attachments for now
+            p_input_attachments: ptr::null(),
+            p_depth_stencil_attachment: ptr::null(),
+            p_resolve_attachments: ptr::null(),
+            p_preserve_attachments: ptr::null(),
+            input_attachment_count: 0,
+            preserve_attachment_count: 0,
+            ..Default::default()            
+        };
+
+        let render_pass_create_info = vk::RenderPassCreateInfo {
+            s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: RenderPassCreateFlags::empty(),
+            attachment_count: 1,
+            p_attachments: &color_attachment,
+            subpass_count: 1,
+            p_subpasses: &subpass,
+            p_dependencies: ptr::null(),
+            dependency_count: 0,
+            ..Default::default()
+        };
+
+        unsafe {
+            device.create_render_pass(&render_pass_create_info, None).unwrap()
+        }
+    }
+
+    fn create_graphics_pipeline(device: &ash::Device, swapchain_extent: vk::Extent2D, render_pass: vk::RenderPass) -> (vk::Pipeline, vk::PipelineLayout) {
+        let vert_bytes: Vec<u8> = fs::read("src/shader.vert.spv").unwrap();
         let frag_bytes: Vec<u8> = fs::read("src/shader.frag.spv").unwrap();
 
         let vert_shader: vk::ShaderModule = App::create_shader_module(device, &vert_bytes);
         let frag_shader: vk::ShaderModule = App::create_shader_module(device, &frag_bytes);
 
-        let vert_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+        let vert_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_name: c"main".as_ptr(),
             p_next: ptr::null(),
@@ -568,18 +628,18 @@ impl App {
             ..Default::default()
         };
 
-        let frag_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+        let frag_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_name: c"main".as_ptr(),
             p_next: ptr::null(),
             flags: vk::PipelineShaderStageCreateFlags::empty(),
             stage: vk::ShaderStageFlags::FRAGMENT,
-            module: vert_shader,
+            module: frag_shader,
             p_specialization_info: ptr::null(), // for constexpr's in shader
             ..Default::default()
         };
 
-        let shader_stages: [vk::PipelineShaderStageCreateInfo; 2] = [vert_shader_stage_info, frag_shader_stage_info];
+        let shader_stage_create_infos: [vk::PipelineShaderStageCreateInfo; 2] = [vert_shader_stage_create_info, frag_shader_stage_create_info];
 
         let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -592,7 +652,7 @@ impl App {
             ..Default::default()
         };
 
-        let vertex_input_assembly_state_info = vk::PipelineInputAssemblyStateCreateInfo {
+        let input_assembly_state_create_info = vk::PipelineInputAssemblyStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             flags: vk::PipelineInputAssemblyStateCreateFlags::empty(),
             p_next: ptr::null(),
@@ -601,36 +661,32 @@ impl App {
             ..Default::default()
         };
 
-        let viewports: [vk::Viewport; 1] = [
-            vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: swapchain_extent.width as f32,
-                height: swapchain_extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            }
-        ];
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: swapchain_extent.width as f32,
+            height: swapchain_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
 
-        let scissors = [
-            vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: swapchain_extent,
-            }
-        ];
-
-        let _viewport_state_create_info = vk::PipelineViewportStateCreateInfo {
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D {x: 0, y: 0},
+            extent: swapchain_extent,
+        };
+        
+        let viewport_state_create_info = vk::PipelineViewportStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineViewportStateCreateFlags::empty(),
-            scissor_count: scissors.len() as u32,
-            p_scissors: scissors.as_ptr(),
-            viewport_count: viewports.len() as u32,
-            p_viewports: viewports.as_ptr(),
+            scissor_count: 1,
+            p_scissors: &scissor,
+            viewport_count: 1,
+            p_viewports: &viewport,
             ..Default::default()
         };
 
-        let _rasterization_statue_create_info = vk::PipelineRasterizationStateCreateInfo {
+        let rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineRasterizationStateCreateFlags::empty(),
@@ -646,7 +702,9 @@ impl App {
             depth_bias_slope_factor: 0.0,
             ..Default::default()
         };
-        let _multisample_state_create_info = vk::PipelineMultisampleStateCreateInfo {
+
+        // no multisampling for now
+        let multisample_state_create_info = vk::PipelineMultisampleStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             flags: vk::PipelineMultisampleStateCreateFlags::empty(),
             p_next: ptr::null(),
@@ -669,7 +727,7 @@ impl App {
             reference: 0,
         };
 
-        let _depth_state_create_info = vk::PipelineDepthStencilStateCreateInfo {
+        let depth_stencil_state_create_info = vk::PipelineDepthStencilStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineDepthStencilStateCreateFlags::empty(),
@@ -687,7 +745,7 @@ impl App {
 
         let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
-            color_write_mask: vk::ColorComponentFlags::all(),
+            color_write_mask: vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B | vk::ColorComponentFlags::A,
             src_color_blend_factor: vk::BlendFactor::ONE,
             dst_color_blend_factor: vk::BlendFactor::ZERO,
             color_blend_op: vk::BlendOp::ADD,
@@ -696,7 +754,7 @@ impl App {
             alpha_blend_op: vk::BlendOp::ADD,
         }];
 
-        let _color_blend_state = vk::PipelineColorBlendStateCreateInfo {
+        let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineColorBlendStateCreateFlags::empty(),
@@ -708,10 +766,73 @@ impl App {
             ..Default::default()
         };
 
+        let dynamic_states: [vk::DynamicState; 2] = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR
+        ];
+
+        let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineDynamicStateCreateFlags::empty(),
+            dynamic_state_count: dynamic_states.len() as u32,
+            p_dynamic_states: dynamic_states.as_ptr(),
+            ..Default::default()
+        };
+
+        // no uniforms for now
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
+            s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineLayoutCreateFlags::empty(),
+            set_layout_count: 0,
+            p_set_layouts: ptr::null(),
+            p_push_constant_ranges: ptr::null(),
+            push_constant_range_count: 0,
+            ..Default::default()
+        };
+
+        let pipeline_layout = unsafe {
+            device.create_pipeline_layout(&pipeline_layout_create_info, None).unwrap()
+        };
+
+        let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
+            s_type: vk::StructureType::GRAPHICS_PIPELINE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineCreateFlags::empty(),
+            stage_count: shader_stage_create_infos.len() as u32,
+            p_stages: shader_stage_create_infos.as_ptr(),
+            p_vertex_input_state: &vertex_input_state_create_info as *const vk::PipelineVertexInputStateCreateInfo,
+            p_input_assembly_state: &input_assembly_state_create_info as *const vk::PipelineInputAssemblyStateCreateInfo,
+            p_tessellation_state: ptr::null(),
+            p_viewport_state: &viewport_state_create_info as *const vk::PipelineViewportStateCreateInfo,
+            p_rasterization_state: &rasterization_state_create_info as *const vk::PipelineRasterizationStateCreateInfo,
+            p_multisample_state: &multisample_state_create_info as *const vk::PipelineMultisampleStateCreateInfo,
+            p_depth_stencil_state: &depth_stencil_state_create_info as *const vk::PipelineDepthStencilStateCreateInfo,
+            p_color_blend_state: &color_blend_state_create_info as *const vk::PipelineColorBlendStateCreateInfo,
+            p_dynamic_state: &dynamic_state_create_info as *const vk::PipelineDynamicStateCreateInfo,
+            layout: pipeline_layout,
+            render_pass: render_pass,
+            subpass: 0, // index to graphics subpass
+            base_pipeline_handle: vk::Pipeline::null(),
+            base_pipeline_index: -1,
+            ..Default::default()
+        };
+
+        let graphics_pipeline_create_infos: [vk::GraphicsPipelineCreateInfo; 1] = [graphics_pipeline_create_info];
+        let graphics_pipelines = unsafe {
+            device.create_graphics_pipelines(vk::PipelineCache::null(), 
+            graphics_pipeline_create_infos.as_slice(),
+            None).unwrap()
+        };
+
         unsafe {
             device.destroy_shader_module(vert_shader, None);
             device.destroy_shader_module(frag_shader, None);
         }
+
+
+        (graphics_pipelines[0], pipeline_layout)
     }
 
     fn create_shader_module(device: &ash::Device, bytes: &Vec<u8>) -> vk::ShaderModule {
@@ -728,11 +849,6 @@ impl App {
             device.create_shader_module(&shader_module_create_info, None).unwrap()
         }
     }
-
-    fn create_render_pass() {
-
-    }
-
 }
 
 impl Drop for App {
@@ -744,6 +860,10 @@ impl Drop for App {
         }
         
         unsafe {
+            self.device.as_ref().unwrap().destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.as_ref().unwrap().destroy_pipeline(self.pipeline, None);
+            self.device.as_ref().unwrap().destroy_render_pass(self.render_pass, None);
+            
             self.swapchain_loader.as_ref().unwrap().destroy_swapchain(self.swapchain, None);
             for image_view in self.swapchain_image_views.iter() {
                 self.device.as_ref().unwrap().destroy_image_view(*image_view, None);
