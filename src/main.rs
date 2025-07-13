@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fs::{self};
 use std::ptr::{self};
-use ash::vk::RenderPassCreateFlags;
+use std::u64;
 use winit::raw_window_handle::HasWindowHandle;
 use winit::{self};
 use ash::{ext, khr, vk};
@@ -14,6 +14,8 @@ const USE_VALIDATION_LAYERS: bool = true;
 const REQUIRED_DEVICE_EXTENSIONS: [*const c_char; 1] = [
     ash::khr::swapchain::NAME.as_ptr()
 ];
+
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 unsafe extern "system" fn vulkan_debug_utils_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -56,21 +58,23 @@ struct SwapChainSupportDetails {
     present_modes: Vec<vk::PresentModeKHR>
 }
 
-struct App {
-    window: Option<winit::window::Window>,
-    entry: ash::Entry,
+struct Renderer {
+    _entry: ash::Entry,
     instance: ash::Instance,
 
     debug_utils_loader: ext::debug_utils::Instance,
     debug_messager: vk::DebugUtilsMessengerEXT,
 
-    physical_device: vk::PhysicalDevice,
-    device: Option<ash::Device>,
-
     surface_loader: khr::surface::Instance,
     surface: vk::SurfaceKHR,
-    
-    swapchain_loader: Option<khr::swapchain::Device>,
+
+    physical_device: vk::PhysicalDevice,
+    device: ash::Device,
+
+    graphics_queue: vk::Queue,
+    present_queue: vk::Queue,
+
+    swapchain_loader: khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_format: vk::Format,
@@ -79,76 +83,159 @@ struct App {
 
     render_pass: vk::RenderPass,
     pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout
+    pipeline_layout: vk::PipelineLayout,
+
+    swapchain_framebuffers: Vec<vk::Framebuffer>,
+
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
+
+    swap_image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+
+    current_frame: usize
 } 
 
-impl winit::application::ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let window = event_loop.create_window(winit::window::Window::default_attributes()).unwrap();
-        
-        self.surface = App::create_surface(&self.entry, &self.instance, &window);
-        self.physical_device = App::pick_physical_device(&self.instance, &self.surface_loader, self.surface);
-        self.device = Some(App::create_logical_device(&self.instance, &self.surface_loader, self.surface, self.physical_device));
-        self.swapchain_loader = Some(khr::swapchain::Device::new(&self.instance, self.device.as_ref().unwrap()));
-        (self.swapchain, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = App::create_swapchain(&self.instance, self.swapchain_loader.as_ref().unwrap(), 100, 100, &self.surface_loader, self.surface, self.physical_device);
-        self.swapchain_image_views = App::create_image_views(self.device.as_ref().unwrap(), &self.swapchain_images, self.swapchain_image_format);
-        self.render_pass = App::create_render_pass(self.device.as_ref().unwrap(), self.swapchain_image_format);
-        (self.pipeline, self.pipeline_layout) = App::create_graphics_pipeline(self.device.as_ref().unwrap(), self.swapchain_extent, self.render_pass);
-
-        self.window = Some(window);
-    }
-
-    fn window_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, _id: winit::window::WindowId, event: winit::event::WindowEvent) {
-        match event {
-            winit::event::WindowEvent::CloseRequested => {
-                event_loop.exit();
-            },
-            winit::event::WindowEvent::RedrawRequested => {
-                self.draw_frame();
-                self.window.as_ref().unwrap().request_redraw();
-            }
-            _ => (),
-        }
-    }
-}
-
-impl App {
-    fn new() -> Self {    
+impl Renderer {
+    fn new(window: &winit::window::Window) -> Self {    
         let entry = unsafe {
             ash::Entry::load().unwrap()
         };
         
-        if USE_VALIDATION_LAYERS && !App::check_validation_layer_support(&entry) {
+        if USE_VALIDATION_LAYERS && !Renderer::check_validation_layer_support(&entry) {
             panic!("requested validation layers but not supported");
         }
-        
-        let instance = App::create_instance(&entry);
-        let debug_utils_loader = ext::debug_utils::Instance::new(&entry, &instance);
-        let debug_messager = App::setup_debug_messenger(&debug_utils_loader);
-        let surface_loader = khr::surface::Instance::new(&entry, &instance);
 
-        App {
-            window: None,
-            entry, instance,
+        
+        let size = window.inner_size();
+
+        let instance = Renderer::create_instance(&entry);
+        let debug_utils_loader = ext::debug_utils::Instance::new(&entry, &instance);
+        let debug_messager = Renderer::setup_debug_messenger(&debug_utils_loader);
+        let surface_loader = khr::surface::Instance::new(&entry, &instance);
+        let surface = Renderer::create_surface(&entry, &instance, &window);
+        let physical_device = Renderer::pick_physical_device(&instance, &surface_loader, surface);
+        let device = Renderer::create_logical_device(&instance, &surface_loader, surface, physical_device);
+        let (graphics_queue, present_queue) = Renderer::get_queue_handles(&device, &instance, &surface_loader, surface, physical_device);
+        let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
+        let (swapchain, swapchain_images, swapchain_image_format, swapchain_extent) = Renderer::create_swapchain(&instance, &swapchain_loader, size.width, size.height, &surface_loader, surface, physical_device);
+        let swapchain_image_views = Renderer::create_image_views(&device, &swapchain_images, swapchain_image_format);
+        let render_pass = Renderer::create_render_pass(&device, swapchain_image_format);
+        let (pipeline, pipeline_layout) = Renderer::create_graphics_pipeline(&device, swapchain_extent, render_pass);
+        let swapchain_framebuffers = Renderer::create_framebuffers(&device, &swapchain_image_views, render_pass, swapchain_extent);
+        let command_pool = Renderer::create_command_pool(&instance, &device, &surface_loader, surface, physical_device);
+        let command_buffers = Renderer::create_command_buffers(&device, command_pool);
+        let (swap_image_available_semaphores, render_finished_semaphores, in_flight_fences) = Renderer::create_sync_objects(&device);
+        
+        Renderer {
+            _entry: entry,
+            instance,
             debug_utils_loader,
             debug_messager,
-            physical_device: vk::PhysicalDevice::null(),
-            device: None,
             surface_loader,
-            surface: vk::SurfaceKHR::null(),
-            swapchain_loader: None,
-            swapchain: vk::SwapchainKHR::null(),
-            swapchain_images: vec![],
-            swapchain_image_format: vk::Format::UNDEFINED,
-            swapchain_extent: vk::Extent2D {width: 0, height: 0},
-            swapchain_image_views: vec![],
-            render_pass: vk::RenderPass::null(),
-            pipeline: vk::Pipeline::null(),
-            pipeline_layout: vk::PipelineLayout::null(),
+            surface,
+            physical_device,
+            device,
+            graphics_queue,
+            present_queue,
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_image_format,
+            swapchain_extent,
+            swapchain_image_views,
+            render_pass,
+            pipeline,
+            pipeline_layout,
+            swapchain_framebuffers,
+            command_pool,
+            command_buffers,
+            swap_image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+            current_frame: 0
         }
     }
 
-    fn draw_frame(&mut self) {
+    fn draw_frame(&mut self, window: &winit::window::Window, window_resized: bool) {
+        let mut image_index: u32 = 0;
+
+        unsafe {
+            self.device.wait_for_fences(std::slice::from_ref(&self.in_flight_fences[self.current_frame]), true, u64::MAX).unwrap();
+            self.device.reset_fences(std::slice::from_ref(&self.in_flight_fences[self.current_frame])).unwrap();
+
+            let result = self.swapchain_loader.acquire_next_image(self.swapchain, u64::MAX, self.swap_image_available_semaphores[self.current_frame], vk::Fence::null());
+
+            match result {
+                Ok(value) => {
+                    image_index = value.0;
+                }
+                Err(error) => {
+                    if error == vk::Result::ERROR_OUT_OF_DATE_KHR || window_resized {
+                        let size = window.inner_size();
+                        self.recreate_swapchain(size);
+                        return;
+                    }
+                    else if error != vk::Result::SUCCESS && error != vk::Result::SUBOPTIMAL_KHR {
+                        panic!("failed to acquire swap chain image!");
+                    }
+                }
+            }    
+
+
+            self.device.reset_command_buffer(self.command_buffers[self.current_frame], vk::CommandBufferResetFlags::empty()).unwrap();
+            self.record_command_buffer(image_index);
+        }
+
+        let wait_stages: [vk::PipelineStageFlags; 1] = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+        let submit_info = vk::SubmitInfo {
+            s_type: vk::StructureType::SUBMIT_INFO,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &self.swap_image_available_semaphores[self.current_frame],
+            p_wait_dst_stage_mask: wait_stages.as_ptr(),
+            command_buffer_count: 1,
+            p_command_buffers: &self.command_buffers[self.current_frame],
+            signal_semaphore_count: 1,
+            p_signal_semaphores: &self.render_finished_semaphores[self.current_frame],
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.queue_submit(self.graphics_queue, std::slice::from_ref(&submit_info), self.in_flight_fences[self.current_frame]).unwrap();
+        };
+
+        let present_info = vk::PresentInfoKHR {
+            s_type: vk::StructureType::PRESENT_INFO_KHR,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &self.render_finished_semaphores[self.current_frame],
+            swapchain_count: 1,
+            p_swapchains: &self.swapchain,
+            p_image_indices: &image_index,
+            p_results: ptr::null_mut(),
+            ..Default::default()
+        };
+
+        unsafe {
+            let result = self.swapchain_loader.queue_present(self.present_queue, &present_info);
+            
+            if result.is_err() {
+                let error: vk::Result = result.unwrap_err();
+
+                if error == vk::Result::ERROR_OUT_OF_DATE_KHR || window_resized {
+                    let size = window.inner_size();
+                    self.recreate_swapchain(size);
+                }
+                else if error != vk::Result::SUCCESS && error != vk::Result::SUBOPTIMAL_KHR {
+                    panic!("failed to acquire swap chain image!");
+                }
+            }
+        };
+
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     fn setup_debug_messenger(debug_utils_loader: &ext::debug_utils::Instance) -> vk::DebugUtilsMessengerEXT {
@@ -202,7 +289,7 @@ impl App {
         let application_name: CString = CString::new("app name").unwrap();
         let engine_name: CString = CString::new("engine name").unwrap();
 
-        let app_info: vk::ApplicationInfo<'_> = vk::ApplicationInfo {
+        let app_info = vk::ApplicationInfo {
             s_type: vk::StructureType::APPLICATION_INFO,
             p_next: ptr::null(),
             p_application_name: application_name.as_ptr(),
@@ -268,7 +355,7 @@ impl App {
         }
 
         for device in devices {
-            if App::is_device_suitable(&instance, surface_loader, surface, device) {
+            if Renderer::is_device_suitable(&instance, surface_loader, surface, device) {
                 return device;
             }
         }
@@ -286,13 +373,13 @@ impl App {
             instance.get_physical_device_features(device)
         };
 
-        let indices: QueueFamilyIndices = App::find_queue_families(&instance, surface_loader, surface, device);
+        let indices: QueueFamilyIndices = Renderer::find_queue_families(&instance, surface_loader, surface, device);
 
-        let is_extensions_supported: bool = App::check_device_extension_support(instance, device);
+        let is_extensions_supported: bool = Renderer::check_device_extension_support(instance, device);
         let mut is_swapchain_adequate: bool = false;
 
         if is_extensions_supported {
-            let swapchain: SwapChainSupportDetails = App::query_swapchain_support(surface_loader, surface, device);
+            let swapchain: SwapChainSupportDetails = Renderer::query_swapchain_support(surface_loader, surface, device);
             is_swapchain_adequate = !swapchain.formats.is_empty() && !swapchain.present_modes.is_empty();
         }
 
@@ -308,7 +395,11 @@ impl App {
 
         let mut i: u32 = 0;
         for family in queue_families {
-            if (family.queue_flags & vk::QueueFlags::GRAPHICS).is_empty() {
+            if family.queue_count == 0 {
+                continue;
+            }
+
+            if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 indices.graphics = Some(i);
             }
 
@@ -331,14 +422,16 @@ impl App {
     }
 
     fn create_logical_device(instance: &ash::Instance, surface_loader: &khr::surface::Instance, surface: vk::SurfaceKHR, physical_device: vk::PhysicalDevice) -> ash::Device {
-        let indices: QueueFamilyIndices = App::find_queue_families(instance, surface_loader, surface, physical_device);
+        let indices: QueueFamilyIndices = Renderer::find_queue_families(instance, surface_loader, surface, physical_device);
         let queue_priority: f32 = 1.0;
 
         
         let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
-        let queue_family_indices: [u32; 2] = [indices.graphics.unwrap(), indices.present.unwrap()];
+        let mut unique_indices: HashSet<u32> = HashSet::new();
+        unique_indices.insert(indices.graphics.unwrap());
+        unique_indices.insert(indices.present.unwrap());
 
-        for queue_family_index in queue_family_indices {
+        for queue_family_index in unique_indices {
             let queue_create_info = vk::DeviceQueueCreateInfo {
                 s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
                 p_next: ptr::null(),
@@ -354,7 +447,7 @@ impl App {
 
         let physical_device_features = vk::PhysicalDeviceFeatures {..Default::default()};
 
-        let device_create_info = vk::DeviceCreateInfo {
+        let create_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
             p_next: ptr::null(),
             p_queue_create_infos: queue_create_infos.as_ptr(),
@@ -367,7 +460,19 @@ impl App {
         };
 
         unsafe {
-            instance.create_device(physical_device, &device_create_info, None).unwrap()
+            instance.create_device(physical_device, &create_info, None).unwrap()
+        }
+    }
+
+    fn get_queue_handles(device: &ash::Device, instance: &ash::Instance, surface_loader: &khr::surface::Instance, surface: vk::SurfaceKHR, physical_device: vk::PhysicalDevice) -> (vk::Queue, vk::Queue) {
+        let indices: QueueFamilyIndices = Renderer::find_queue_families(instance, surface_loader, surface, physical_device);
+
+
+        unsafe {
+            (
+                device.get_device_queue(indices.graphics.unwrap(), 0),
+                device.get_device_queue(indices.present.unwrap(), 0)
+            )
         }
     }
 
@@ -465,18 +570,18 @@ impl App {
     }
 
     fn create_swapchain(instance: &ash::Instance, swapchain_loader: &khr::swapchain::Device, width: u32, height: u32, surface_loader: &khr::surface::Instance, surface: vk::SurfaceKHR, device: vk::PhysicalDevice) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
-        let swapchain: SwapChainSupportDetails = App::query_swapchain_support(surface_loader, surface, device);
+        let swapchain: SwapChainSupportDetails = Renderer::query_swapchain_support(surface_loader, surface, device);
 
-        let surface_format: vk::SurfaceFormatKHR = App::choose_swap_surface_format(&swapchain.formats);
-        let present_mode: vk::PresentModeKHR = App::choose_swap_present_mode(&swapchain.present_modes);
-        let extent: vk::Extent2D = App::choose_swap_extent(width, height, &swapchain.capabilities);
+        let surface_format: vk::SurfaceFormatKHR = Renderer::choose_swap_surface_format(&swapchain.formats);
+        let present_mode: vk::PresentModeKHR = Renderer::choose_swap_present_mode(&swapchain.present_modes);
+        let extent: vk::Extent2D = Renderer::choose_swap_extent(width, height, &swapchain.capabilities);
          
         let mut image_count: u32 = swapchain.capabilities.min_image_count + 1;
         if image_count > swapchain.capabilities.max_image_count {
             image_count = swapchain.capabilities.min_image_count;
         }
 
-        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR {
+        let mut create_info = vk::SwapchainCreateInfoKHR {
             s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
             p_next: ptr::null(),
             min_image_count: image_count,
@@ -498,17 +603,17 @@ impl App {
             ..Default::default()
         };
 
-        let indices: QueueFamilyIndices = App::find_queue_families(instance, surface_loader, surface, device);
+        let indices: QueueFamilyIndices = Renderer::find_queue_families(instance, surface_loader, surface, device);
         let queue_family_indices: [u32; 2] = [indices.graphics.unwrap(), indices.present.unwrap()];
 
         if indices.graphics != indices.present {
-            swapchain_create_info.image_sharing_mode = vk::SharingMode::CONCURRENT;
-            swapchain_create_info.queue_family_index_count = queue_family_indices.len() as u32;
-            swapchain_create_info.p_queue_family_indices = queue_family_indices.as_ptr();
+            create_info.image_sharing_mode = vk::SharingMode::CONCURRENT;
+            create_info.queue_family_index_count = queue_family_indices.len() as u32;
+            create_info.p_queue_family_indices = queue_family_indices.as_ptr();
         } 
 
         let swapchain = unsafe {
-            swapchain_loader.create_swapchain(&swapchain_create_info, None).unwrap()
+            swapchain_loader.create_swapchain(&create_info, None).unwrap()
         };
 
         let swap_chain_images: Vec<vk::Image> = unsafe {
@@ -526,7 +631,7 @@ impl App {
         swapchain_image_views.reserve(swapchain_images.len());
 
         for i in 0..swapchain_images.len() {
-            let image_view_create_info = vk::ImageViewCreateInfo {
+            let create_info = vk::ImageViewCreateInfo {
                 s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
                 p_next: ptr::null(),
                 flags: vk::ImageViewCreateFlags::empty(),
@@ -550,7 +655,7 @@ impl App {
             };
             
             swapchain_image_views.push(unsafe {
-                device.create_image_view(&image_view_create_info, None).unwrap()
+                device.create_image_view(&create_info, None).unwrap()
             });
         }
 
@@ -592,16 +697,26 @@ impl App {
             ..Default::default()            
         };
 
+        let dependency = vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dependency_flags: vk::DependencyFlags::empty()
+        };
+
         let render_pass_create_info = vk::RenderPassCreateInfo {
             s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
             p_next: ptr::null(),
-            flags: RenderPassCreateFlags::empty(),
+            flags: vk::RenderPassCreateFlags::empty(),
             attachment_count: 1,
             p_attachments: &color_attachment,
             subpass_count: 1,
             p_subpasses: &subpass,
-            p_dependencies: ptr::null(),
-            dependency_count: 0,
+            p_dependencies: &dependency,
+            dependency_count: 1,
             ..Default::default()
         };
 
@@ -614,8 +729,8 @@ impl App {
         let vert_bytes: Vec<u8> = fs::read("src/shader.vert.spv").unwrap();
         let frag_bytes: Vec<u8> = fs::read("src/shader.frag.spv").unwrap();
 
-        let vert_shader: vk::ShaderModule = App::create_shader_module(device, &vert_bytes);
-        let frag_shader: vk::ShaderModule = App::create_shader_module(device, &frag_bytes);
+        let vert_shader: vk::ShaderModule = Renderer::create_shader_module(device, &vert_bytes);
+        let frag_shader: vk::ShaderModule = Renderer::create_shader_module(device, &frag_bytes);
 
         let vert_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -836,7 +951,7 @@ impl App {
     }
 
     fn create_shader_module(device: &ash::Device, bytes: &Vec<u8>) -> vk::ShaderModule {
-        let shader_module_create_info = vk::ShaderModuleCreateInfo {
+        let create_info = vk::ShaderModuleCreateInfo {
             s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::ShaderModuleCreateFlags::empty(),
@@ -846,12 +961,187 @@ impl App {
         };
 
         unsafe {
-            device.create_shader_module(&shader_module_create_info, None).unwrap()
+            device.create_shader_module(&create_info, None).unwrap()
+        }
+    }
+
+    fn create_framebuffers(device: &ash::Device, swapchain_image_views: &Vec<vk::ImageView>, render_pass: vk::RenderPass, swapchain_extent: vk::Extent2D) -> Vec<vk::Framebuffer> {
+        let mut swapchain_framebuffers: Vec<vk::Framebuffer> = vec![];
+        swapchain_framebuffers.reserve(swapchain_image_views.len());
+
+        for image_view in swapchain_image_views {
+            let create_info = vk::FramebufferCreateInfo {
+                s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: vk::FramebufferCreateFlags::empty(),
+                render_pass: render_pass,
+                attachment_count: 1,
+                p_attachments: &*image_view,
+                width: swapchain_extent.width,
+                height: swapchain_extent.height,
+                layers: 1,
+                ..Default::default()
+            };
+
+            swapchain_framebuffers.push(unsafe {
+                device.create_framebuffer(&create_info, None).unwrap()
+            });
+        }
+
+        swapchain_framebuffers
+    }
+
+    fn create_command_pool(instance: &ash::Instance, device: &ash::Device, surface_loader: &khr::surface::Instance, surface: vk::SurfaceKHR, physical_device: vk::PhysicalDevice) -> vk::CommandPool {
+        let queue_family_indices: QueueFamilyIndices = Renderer::find_queue_families(instance, surface_loader, surface, physical_device);
+
+        let create_info = vk::CommandPoolCreateInfo {
+            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            queue_family_index: queue_family_indices.graphics.unwrap(),
+            ..Default::default()
+        };
+
+        unsafe {
+            device.create_command_pool(&create_info, None).unwrap()
+        }
+    }
+
+    fn create_command_buffers(device: &ash::Device, command_pool: vk::CommandPool) -> Vec<vk::CommandBuffer> {
+        let allocate_info = vk::CommandBufferAllocateInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            command_pool: command_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count: MAX_FRAMES_IN_FLIGHT as u32,
+            ..Default::default()
+        };
+
+        unsafe {
+            device.allocate_command_buffers(&allocate_info).unwrap()
+        }
+    }
+
+    fn record_command_buffer(&self, swap_image_index: u32) {
+        let command_buffer_begin_info = vk::CommandBufferBeginInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
+            p_next: ptr::null(),
+            flags: vk::CommandBufferUsageFlags::empty(),
+            p_inheritance_info: ptr::null(),
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.begin_command_buffer(self.command_buffers[self.current_frame], &command_buffer_begin_info).unwrap()
+        }
+
+        let clear_color = vk::ClearValue {
+            color: vk::ClearColorValue {float32: [0.0, 0.0, 0.0, 1.0]}
+        };
+
+        let render_pass_begin_info = vk::RenderPassBeginInfo {
+            s_type: vk::StructureType::RENDER_PASS_BEGIN_INFO,
+            p_next: ptr::null(),
+            render_pass: self.render_pass,
+            framebuffer: self.swapchain_framebuffers[swap_image_index as usize],
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D {x: 0, y: 0},
+                extent: self.swapchain_extent
+            },
+            clear_value_count: 1,
+            p_clear_values: &clear_color,
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.cmd_begin_render_pass(self.command_buffers[self.current_frame], &render_pass_begin_info, vk::SubpassContents::INLINE);
+            self.device.cmd_bind_pipeline(self.command_buffers[self.current_frame], vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            
+            let viewport = vk::Viewport{
+                x: 0.0,
+                y: 0.0,
+                width: self.swapchain_extent.width as f32,
+                height: self.swapchain_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0
+            };
+
+            self.device.cmd_set_viewport(self.command_buffers[self.current_frame], 0, std::slice::from_ref(&viewport));
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D {x: 0, y: 0},
+                extent: self.swapchain_extent,
+            };
+
+            self.device.cmd_set_scissor(self.command_buffers[self.current_frame], 0, std::slice::from_ref(&scissor));
+
+            self.device.cmd_draw(self.command_buffers[self.current_frame], 3, 1, 0, 0);
+            self.device.cmd_end_render_pass(self.command_buffers[self.current_frame]);
+            self.device.end_command_buffer(self.command_buffers[self.current_frame]).unwrap();
+        }
+    }
+
+    fn create_sync_objects(device: &ash::Device) -> (Vec<vk::Semaphore>, Vec<vk::Semaphore>, Vec<vk::Fence>) {
+        let semamphore_create_info = vk::SemaphoreCreateInfo {
+            s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::SemaphoreCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let fence_create_info = vk::FenceCreateInfo {
+            s_type: vk::StructureType::FENCE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()
+        };
+
+        let mut swap_image_available_semaphores: Vec<vk::Semaphore> = vec![];
+        let mut render_finished_semaphores: Vec<vk::Semaphore> = vec![];
+        let mut in_flight_fences: Vec<vk::Fence> = vec![];
+        
+        swap_image_available_semaphores.reserve(MAX_FRAMES_IN_FLIGHT);
+        render_finished_semaphores.reserve(MAX_FRAMES_IN_FLIGHT);
+        in_flight_fences.reserve(MAX_FRAMES_IN_FLIGHT);
+
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            unsafe {
+                swap_image_available_semaphores.push(device.create_semaphore(&semamphore_create_info, None).unwrap());
+                render_finished_semaphores.push(device.create_semaphore(&semamphore_create_info, None).unwrap());
+                in_flight_fences.push(device.create_fence(&fence_create_info, None).unwrap());
+            }
+        }
+
+        (swap_image_available_semaphores, render_finished_semaphores, in_flight_fences)
+    }
+
+    fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        unsafe {
+            self.device.device_wait_idle().unwrap();
+        }
+
+        self.cleanup_swapchain();
+        (self.swapchain, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = Renderer::create_swapchain(&self.instance, &self.swapchain_loader, size.width, size.height, &self.surface_loader, self.surface, self.physical_device);
+        self.swapchain_image_views = Renderer::create_image_views(&self.device, &self.swapchain_images, self.swapchain_image_format);
+        self.swapchain_framebuffers = Renderer::create_framebuffers(&self.device, &self.swapchain_image_views, self.render_pass, self.swapchain_extent);
+    }
+
+    fn cleanup_swapchain(&self) {
+        unsafe {
+            for framebuffer in self.swapchain_framebuffers.iter() {
+                self.device.destroy_framebuffer(*framebuffer, None);
+            }
+
+            for image_view in self.swapchain_image_views.iter() {
+                self.device.destroy_image_view(*image_view, None);
+            }
+            
+            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
         }
     }
 }
 
-impl Drop for App {
+impl Drop for Renderer {
     fn drop(&mut self) {
         if USE_VALIDATION_LAYERS {
             unsafe {
@@ -860,16 +1150,22 @@ impl Drop for App {
         }
         
         unsafe {
-            self.device.as_ref().unwrap().destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.as_ref().unwrap().destroy_pipeline(self.pipeline, None);
-            self.device.as_ref().unwrap().destroy_render_pass(self.render_pass, None);
+            self.device.device_wait_idle().unwrap();
+            self.cleanup_swapchain();
             
-            self.swapchain_loader.as_ref().unwrap().destroy_swapchain(self.swapchain, None);
-            for image_view in self.swapchain_image_views.iter() {
-                self.device.as_ref().unwrap().destroy_image_view(*image_view, None);
+            for i in 0..MAX_FRAMES_IN_FLIGHT as usize {
+                self.device.destroy_semaphore(self.swap_image_available_semaphores[i], None);
+                self.device.destroy_semaphore(self.render_finished_semaphores[i], None);
+                self.device.destroy_fence(self.in_flight_fences[i], None);
             }
 
-            self.device.as_ref().unwrap().destroy_device(None);
+            self.device.destroy_command_pool(self.command_pool, None);
+            
+            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_render_pass(self.render_pass, None);
+
+            self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             
             self.instance.destroy_instance(None);
@@ -897,10 +1193,46 @@ fn populate_debug_messenger_create_info(create_info: &mut vk::DebugUtilsMessenge
     create_info.p_user_data = ptr::null_mut();
 }
 
+
+#[derive(Default)]
+struct App {
+    window: Option<winit::window::Window>,
+    renderer: Option<Renderer>,
+    window_resized: bool
+}
+
+impl winit::application::ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let window = event_loop.create_window(winit::window::Window::default_attributes()).unwrap();
+        self.renderer = Some(Renderer::new(&window));
+        self.window = Some(window);
+    }
+
+    fn window_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, _id: winit::window::WindowId, event: winit::event::WindowEvent) {
+        match event {
+            winit::event::WindowEvent::CloseRequested => {
+                event_loop.exit();
+            },
+            winit::event::WindowEvent::Resized(_size) => {
+                self.window_resized = true;
+            }
+            winit::event::WindowEvent::RedrawRequested => {
+                self.renderer.as_mut().unwrap().draw_frame(self.window.as_ref().unwrap(), self.window_resized);
+                self.window.as_ref().unwrap().request_redraw();
+
+                if self.window_resized {
+                    self.window_resized = false;
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 fn main() {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     
-    let mut app: App = App::new();
+    let mut app: App = Default::default();
     event_loop.run_app(&mut app).unwrap();
 }
