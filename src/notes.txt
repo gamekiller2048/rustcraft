@@ -1,0 +1,76 @@
+Queue Family:
+- a set of one or more queues which have similar functionality (GRAPHICS, TRANSFER, COMPUTE)
+- each queue family own's their own resources
+
+Queue:
+- is where commands are submitted
+- note: a queue guarantees submission FIFO but the commands execute asynchronously
+    E.g: a write can be submitted before a read but it may not finish before executing the read
+- if queues are from the same family, resource sharing between the queues is allowed even with EXCLUSIVE mode
+- if queues are from different families, manual queue family ownership transfer must be used unless CONCURRENT mode is used
+
+vkImageSubresourceRange:
+- specifies an image from properties like:
+- mipmap, layer
+- aspect describes which bits are actually used in the format (usually for formats including both STENCIL + DEPTH)
+
+vkImageLayout:
+- essentially the layout in memory of an image
+- it may be more efficient to store an image in one layout than another
+
+vkImageTiling:
+- like an image layout (defines memory arrangment of image) but fixed and cannot be changed
+- VK_IMAGE_TILING_LINEAR is row major (like a matrix of pixels)
+- use VK_IMAGE_TILING_OPTIMAL if you don't need to read on CPU
+
+vkImageMemoryBarrier:
+- used to synchornize image layout transitions from old_layout -> new_layout
+- src_queue_family_index/dst_queue_family_index is used to transfer ownership between queue families
+- use QUEUE_FAMILY_IGNORED if no transfer
+
+vkCmdPipelineBarrier:
+- used to execute a memory barrier
+- this syncs commands submitted to a queue via a command buffer
+- a memory barrier is like a link in a queue (write -> barrier -> read)
+- note: a queue guarantees submission FIFO but the commands execute asynchronously
+    E.g: a write can be submitted before a read but it may not finish before executing the read
+- the barrier must wait until src_stage_mask (stage in the pipeline) finishes
+- dst_stage_mask is what must wait for src_stage_mask
+    (it must be specified as it tells vulkan which commands must wait until src_stage or vulkan will not otherwise)
+
+vkAttachmentDescription:
+- a description of an attachment (how an image will be used in the subpass)
+- store/load operations
+- color/depth
+- format
+
+vkAttachmentReference:
+- references an attachment + an image layout which will be automatically transitioned by vulkan in the subpass
+
+vkSubpassDescription:
+- a render pass (like a step in a feed-forward post proccessing effect)
+- defines input attachments refs (for reading) and output attachments refs (for writing)
+- note: this means the attachment references must have correct image layout for read/write
+
+vk::SubpassDependency:
+- used to synchornize betweeen subpasses and implicit external subpasses (before or after the full renderpass)
+- src/dst subpass is the index to the subpass
+- src_subpass=VK_SUBPASS_EXTERNAL for the external subpass
+- src/dst stage in the pipeline + src/dst access flags
+
+vkRenderPass:
+- wraps all subpasses and dependencies
+
+vkFrameBuffer:
+- connects an image view to an attachment
+- the p_attachments parameter specify the image views to connect to the attachments which are specified in the render pass
+- the image views are connected by their index in p_attachments to the coresponding attachment index defined in render pass
+
+vkDescriptorSetLayoutBinding:
+- describes the binding of a descriptor
+- binding index, type
+
+vkDescriptorSetLayoutCreateInfo:
+- describes the layout of a set of descriptors
+- contains multiple descriptor layout bindings
+

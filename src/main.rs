@@ -193,6 +193,7 @@ struct Renderer {
     swapchain_extent: vk::Extent2D,
     swapchain_image_views: Vec<vk::ImageView>,
 
+    depth_image_format: vk::Format,
     depth_image: vk::Image,
     depth_image_memory: vk::DeviceMemory,
     depth_image_view: vk::ImageView,
@@ -294,6 +295,7 @@ impl Renderer {
             swapchain_image_format,
             swapchain_extent,
             swapchain_image_views,
+            depth_image_format,
             depth_image,
             depth_image_memory,
             depth_image_view,
@@ -840,7 +842,7 @@ impl Renderer {
             layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         };
 
-        let subpass = vk::SubpassDescription {
+        let subpass: vk::SubpassDescription<'_> = vk::SubpassDescription {
             flags: vk::SubpassDescriptionFlags::empty(),
             pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
             p_color_attachments: &color_attachment_ref,
@@ -860,8 +862,8 @@ impl Renderer {
             src_subpass: vk::SUBPASS_EXTERNAL,
             dst_subpass: 0,
             src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            src_access_mask: vk::AccessFlags::empty(),
             dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            src_access_mask: vk::AccessFlags::empty(),
             dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             dependency_flags: vk::DependencyFlags::empty()
         };
@@ -1292,6 +1294,7 @@ impl Renderer {
         self.cleanup_swapchain();
         (self.swapchain, self.swapchain_images, self.swapchain_image_format, self.swapchain_extent) = Renderer::create_swapchain(&self.swapchain_loader, size.width, size.height, &self.surface_loader, self.surface, self.physical_device, &self.queue_family_indices);
         self.swapchain_image_views = Renderer::create_image_views(&self.device, &self.swapchain_images, self.swapchain_image_format);
+        (self.depth_image, self.depth_image_memory, self.depth_image_view) = Renderer::create_depth_resources(&self.instance, &self.device, self.physical_device, self.swapchain_extent, self.depth_image_format);
         self.swapchain_framebuffers = Renderer::create_framebuffers(&self.device, &self.swapchain_image_views, self.depth_image_view, self.render_pass, self.swapchain_extent);
     }
 
@@ -1655,7 +1658,7 @@ impl Renderer {
     }
 
     fn create_texture_image(instance: &ash::Instance, device: &ash::Device, physical_device: vk::PhysicalDevice, single_time_command_pool: vk::CommandPool, graphics_queue: vk::Queue) -> (vk::Image, vk::DeviceMemory) {
-        let image= image::ImageReader::open("image.png").unwrap().decode().unwrap().into_rgba8();
+        let image= image::ImageReader::open("image2.png").unwrap().decode().unwrap().into_rgba8();
         let pixels: &[u8] = image.as_bytes();
 
         let buffer_size: vk::DeviceSize = (size_of::<u8>() * pixels.len()) as u64;
