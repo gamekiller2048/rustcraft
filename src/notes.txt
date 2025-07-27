@@ -65,12 +65,28 @@ vkFrameBuffer:
 - connects an image view to an attachment
 - the p_attachments parameter specify the image views to connect to the attachments which are specified in the render pass
 - the image views are connected by their index in p_attachments to the coresponding attachment index defined in render pass
+- note: the attachment indexes are taken from the attachment references of a subpass (usually the one drawing to the screen)
 
 vkDescriptorSetLayoutBinding:
 - describes the binding of a descriptor
-- binding index, type
+- each binding can also be an array denoted by descriptor_count
 
 vkDescriptorSetLayoutCreateInfo:
 - describes the layout of a set of descriptors
-- contains multiple descriptor layout bindings
+- contains multiple descriptor layout binding
 
+
+vkDescriptorPool:
+- a memory pool to allocate descriptor sets
+- pool_sizes is the total number of descriptors of each type that can be allocated from the pool
+- for a single layout this can be calculated using a count of all the descriptor types * num_sets (max num of sets allocated for this layout)
+- note: if a descriptor is an array, all elements count as descriptors
+- with multiple layouts we must sum the descriptor counts across each layout * num_sets (for each layouot)
+- max_sets is the max number of descriptor sets that can be allocated
+- note: if we allocate more sets then max_sets, we cannot allocate anymore even if pool_sizes has remaining unallocated descriptors (idk why)
+
+vkWriteDescriptorSet:
+- describes how we should write to a descriptor set
+- since a descriptor can be an array, we can update part of an array be specifying 
+    dst_array_elementdescriptor_count (the start offset into the array)
+    descriptor_count (the number of preceding descriptors in the array)

@@ -53,3 +53,35 @@ impl<'a> DescriptorSetLayoutBuilder<'a> {
         pool_sizes
     }
 }
+
+pub fn create_descriptor_uniform_buffer_write<'a>(set: vk::DescriptorSet, buffer_info: &vk::DescriptorBufferInfo, binding: u32, index_offset: u32, num_descriptors: u32) -> vk::WriteDescriptorSet<'a> {
+    vk::WriteDescriptorSet {
+        s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+        p_next: ptr::null(),
+        dst_set: set,
+        dst_binding: binding,
+        dst_array_element: index_offset,
+        descriptor_count: num_descriptors,
+        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+        p_image_info: ptr::null(),
+        p_buffer_info: buffer_info,
+        p_texel_buffer_view: ptr::null(),
+        ..Default::default()
+    }
+}
+
+pub fn create_descriptor_image_sampler_write<'a>(set: vk::DescriptorSet, image_info: &vk::DescriptorImageInfo, binding: u32, index_offset: u32, num_descriptors: u32) -> vk::WriteDescriptorSet<'a> {
+    vk::WriteDescriptorSet {
+        s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+        p_next: ptr::null(),
+        dst_set: set,
+        dst_binding: binding,
+        dst_array_element: index_offset,
+        descriptor_count: num_descriptors,
+        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        p_image_info: image_info,
+        p_buffer_info: ptr::null(),
+        p_texel_buffer_view: ptr::null(),
+        ..Default::default()
+    }
+}

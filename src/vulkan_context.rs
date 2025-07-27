@@ -1,37 +1,37 @@
 use std::collections::HashSet;
 use std::ffi::{c_char, CStr};
-use std::ptr;
+use std::{num, ptr};
 use std::u64;
 use ash::{khr, vk};
 
 #[derive(Default)]
 pub struct QueueFamilyIndices {
-    graphics: Option<u32>,
-    present: Option<u32>
+    pub graphics: Option<u32>,
+    pub present: Option<u32>
 }
 
 #[derive(Default)]
 pub struct SwapChainSupportDetails {
-    capabilities: vk::SurfaceCapabilitiesKHR,
-    formats: Vec<vk::SurfaceFormatKHR>,
-    present_modes: Vec<vk::PresentModeKHR>
+    pub capabilities: vk::SurfaceCapabilitiesKHR,
+    pub formats: Vec<vk::SurfaceFormatKHR>,
+    pub present_modes: Vec<vk::PresentModeKHR>
 }
 
 pub struct VulkanContext {
-    instance: ash::Instance,
+    pub instance: ash::Instance,
 
-    physical_device: vk::PhysicalDevice,
-    queue_family_indices: QueueFamilyIndices,
-    swapchain_details: SwapChainSupportDetails,
+    pub physical_device: vk::PhysicalDevice,
+    pub queue_family_indices: QueueFamilyIndices,
+    pub swapchain_details: SwapChainSupportDetails,
     
-    device: ash::Device,
+    pub device: ash::Device,
 
-    graphics_queue: vk::Queue,
-    present_queue: vk::Queue,
+    pub graphics_queue: vk::Queue,
+    pub present_queue: vk::Queue,
 
-    swapchain_loader: khr::swapchain::Device,
+    pub swapchain_loader: khr::swapchain::Device,
 
-    single_time_command_pool: vk::CommandPool
+    pub single_time_command_pool: vk::CommandPool
 }
 
 const USE_VALIDATION_LAYERS: bool = true;
@@ -177,7 +177,6 @@ impl VulkanContext {
 
     fn create_logical_device(instance: &ash::Instance, physical_device: vk::PhysicalDevice, queue_family_indices: &QueueFamilyIndices) -> ash::Device {
         let queue_priority: f32 = 1.0;
-
         
         let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
         let mut unique_indices: HashSet<u32> = HashSet::new();
@@ -229,55 +228,20 @@ impl VulkanContext {
         }
     }
 
-    fn choose_swap_surface_format(available: &Vec<vk::SurfaceFormatKHR>) -> vk::SurfaceFormatKHR {
-        for format in available {
-            if format.format == vk::Format::B8G8R8A8_SRGB && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR {
-                return *format;
-            }
-        }
-
-        available[0]
-    }
-
-    fn choose_swap_present_mode(available: &Vec<vk::PresentModeKHR>) -> vk::PresentModeKHR {
-        for mode in available {
-            if *mode == vk::PresentModeKHR::MAILBOX {
-                return *mode;
-            }
-        }
-
-        available[0]
-    }
-
-    fn choose_swap_extent(width: u32, height: u32, capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
-        if capabilities.current_extent.width != u32::MAX {
-            return capabilities.current_extent;
-        }
-
-        vk::Extent2D {
-            width: width.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
-            height: height.clamp(capabilities.min_image_extent.height, capabilities.max_image_extent.height)
-        }
-    }
-
-    pub fn create_swapchain(&self, width: u32, height: u32, surface: vk::SurfaceKHR) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
-        let surface_format: vk::SurfaceFormatKHR = Self::choose_swap_surface_format(&self.swapchain_details.formats);
-        let present_mode: vk::PresentModeKHR = Self::choose_swap_present_mode(&self.swapchain_details.present_modes);
-        let extent: vk::Extent2D = Self::choose_swap_extent(width, height, &self.swapchain_details.capabilities);
-         
+    pub fn create_swapchain(&self, surface: vk::SurfaceKHR, format: vk::SurfaceFormatKHR, present_mode: vk::PresentModeKHR, extent: vk::Extent2D) -> (vk::SwapchainKHR, Vec<vk::Image>) {
         let mut image_count: u32 = self.swapchain_details.capabilities.min_image_count + 1;
         if image_count > self.swapchain_details.capabilities.max_image_count {
             image_count = self.swapchain_details.capabilities.min_image_count;
         }
-
+        
         let mut create_info = vk::SwapchainCreateInfoKHR {
             s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
             p_next: ptr::null(),
             min_image_count: image_count,
-            image_format: surface_format.format,
+            image_format: format.format,
             flags: vk::SwapchainCreateFlagsKHR::empty(),
             surface: surface,
-            image_color_space: surface_format.color_space,
+            image_color_space: format.color_space,
             image_extent: extent,
             image_array_layers: 1,
             image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
@@ -307,11 +271,8 @@ impl VulkanContext {
         let swap_chain_images: Vec<vk::Image> = unsafe {
             self.swapchain_loader.get_swapchain_images(swapchain).unwrap()
         };
-
-        let swapchain_image_format = surface_format.format;
-        let swapchain_extent = extent;
         
-        (swapchain, swap_chain_images, swapchain_image_format, swapchain_extent)
+        (swapchain, swap_chain_images)
     }
 
     fn find_memory_type(&self, suitable_memory_bits: u32, required_properties: vk::MemoryPropertyFlags) -> u32 {
@@ -329,7 +290,7 @@ impl VulkanContext {
         panic!("failed to find suitable memory")
     }
 
-    fn create_command_pool(&self, flags: vk::CommandPoolCreateFlags) -> vk::CommandPool {
+    pub fn create_command_pool(&self, flags: vk::CommandPoolCreateFlags) -> vk::CommandPool {
         let create_info = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
             p_next: ptr::null(),
@@ -437,7 +398,19 @@ impl VulkanContext {
         (buffer_memory, buffer)
     }
 
-    fn copy_buffer(&self, src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceSize) {
+    pub fn map_memory<T>(&self, memory: vk::DeviceMemory, offset: u64, size: vk::DeviceSize) -> *mut T {
+        unsafe {
+            self.device.map_memory(memory, offset, size, vk::MemoryMapFlags::empty()).unwrap() as *mut T
+        }   
+    }
+
+    pub fn unmap<T>(&self, memory: vk::DeviceMemory) {
+        unsafe {
+            self.device.unmap_memory(memory);
+        };
+    }
+
+    pub fn copy_buffer(&self, src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceSize) {
         let command_buffer: vk::CommandBuffer = self.begin_single_time_commands();
         let region = vk::BufferCopy {
             src_offset: 0,
@@ -511,6 +484,12 @@ impl VulkanContext {
         }
     }
 
+    pub fn destroy_shader_module(&self, shader: vk::ShaderModule) {
+        unsafe {
+            self.device.destroy_shader_module(shader, None);
+        };
+    }
+
     pub fn create_descriptor_pool(&self, pool_sizes: &[vk::DescriptorPoolSize], max_sets: u32) -> vk::DescriptorPool {
         let create_info = vk::DescriptorPoolCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
@@ -554,6 +533,12 @@ impl VulkanContext {
 
         unsafe {
             self.device.allocate_descriptor_sets(&allocate_info).unwrap()
+        }
+    }
+
+    pub fn write_descriptors(&self, writes: &[vk::WriteDescriptorSet], copies: &[vk::CopyDescriptorSet]) {
+        unsafe {
+            self.device.update_descriptor_sets(&writes, copies);
         }
     }
 
@@ -654,6 +639,110 @@ impl VulkanContext {
         };
 
         (image, image_memory)
+    }
+
+    pub fn create_command_buffers(&self, command_pool: vk::CommandPool, level: vk::CommandBufferLevel, num_buffers: u32) -> Vec<vk::CommandBuffer> {
+        let allocate_info = vk::CommandBufferAllocateInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            command_pool: command_pool,
+            level: level,
+            command_buffer_count: num_buffers,
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.allocate_command_buffers(&allocate_info).unwrap()
+        }
+    }
+    
+    pub fn find_supported_format(&self, candidates: &Vec<vk::Format>, tiling: vk::ImageTiling, features: vk::FormatFeatureFlags) -> vk::Format {
+        for format in candidates {
+            let properties: vk::FormatProperties = unsafe {
+                self.instance.get_physical_device_format_properties(self.physical_device, *format)
+            };
+
+            if tiling == vk::ImageTiling::LINEAR && properties.linear_tiling_features.contains(features) ||
+                tiling == vk::ImageTiling::OPTIMAL && properties.optimal_tiling_features.contains(features) {
+                return *format;
+            }
+        }
+
+        vk::Format::UNDEFINED
+    }
+
+    pub fn create_pipeline_layout(&self, descriptor_set_layouts: &[vk::DescriptorSetLayout], push_constants: &[vk::PushConstantRange]) -> vk::PipelineLayout {
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
+            s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineLayoutCreateFlags::empty(),
+            set_layout_count: descriptor_set_layouts.len() as u32,
+            p_set_layouts: descriptor_set_layouts.as_ptr(),
+            p_push_constant_ranges: push_constants.as_ptr(),
+            push_constant_range_count: push_constants.len() as u32,
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.create_pipeline_layout(&pipeline_layout_create_info, None).unwrap()
+        }
+    }
+
+    pub fn create_framebuffer(&self, render_pass: vk::RenderPass, attachments: &[vk::ImageView], extent: vk::Extent2D, layers: u32) -> vk::Framebuffer {
+        let create_info = vk::FramebufferCreateInfo {
+            s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::FramebufferCreateFlags::empty(),
+            render_pass: render_pass,
+            attachment_count: attachments.len() as u32,
+            p_attachments: attachments.as_ptr(),
+            width: extent.width,
+            height: extent.height,
+            layers: layers,
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.create_framebuffer(&create_info, None).unwrap()
+        }
+    }
+
+    pub fn create_semaphores(&self, num_semaphores: u32) -> Vec<vk::Semaphore> {
+        let create_info = vk::SemaphoreCreateInfo {
+            s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::SemaphoreCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let mut semaphores: Vec<vk::Semaphore> = Vec::with_capacity(num_semaphores as usize);
+        
+        for _ in 0..num_semaphores {
+            semaphores.push(unsafe {
+                self.device.create_semaphore(&create_info, None).unwrap()
+            });
+        }
+
+        semaphores
+    }
+
+    pub fn create_fences(&self, num_fences: u32) -> Vec<vk::Fence> {
+        let create_info = vk::FenceCreateInfo {
+            s_type: vk::StructureType::FENCE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()
+        };
+
+        let mut fences: Vec<vk::Fence> = Vec::with_capacity(num_fences as usize);
+        
+        for _ in 0..num_fences {
+            fences.push(unsafe {
+                self.device.create_fence(&create_info, None).unwrap()
+            });
+        }
+
+        fences
     }
 }
 
