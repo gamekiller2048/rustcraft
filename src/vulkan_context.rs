@@ -1,11 +1,10 @@
 use ash::{khr, vk};
+use log::debug;
 use std::collections::HashSet;
 use std::ffi::{CStr, c_char};
-use std::hash::Hash;
-use std::ptr;
-use std::u64;
+use std::{ptr, u64};
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct QueueFamilyIndices {
     pub graphics: HashSet<u32>,
     pub present: HashSet<u32>,
@@ -14,7 +13,7 @@ pub struct QueueFamilyIndices {
     pub compute: HashSet<u32>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct SwapChainSupportDetails {
     pub capabilities: vk::SurfaceCapabilitiesKHR,
     pub formats: Vec<vk::SurfaceFormatKHR>,
@@ -234,6 +233,9 @@ impl VulkanContext {
             panic!("failed to find suitable device");
         }
 
+        debug!("chosen device with max score: {}", max_score);
+        debug!("chosen device has queue families: {:?}", best.1);
+
         best
     }
 
@@ -291,7 +293,7 @@ impl VulkanContext {
         }
     }
 
-    fn find_memory_type(
+    pub fn find_memory_type(
         &self,
         suitable_memory_bits: u32,
         required_properties: vk::MemoryPropertyFlags,
@@ -314,51 +316,6 @@ impl VulkanContext {
         panic!("failed to find suitable memory")
     }
 
-    pub fn create_buffer(
-        &self,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        properties: vk::MemoryPropertyFlags,
-        sharing_mode: vk::SharingMode,
-        queue_family_indices: &[u32],
-    ) -> (vk::DeviceMemory, vk::Buffer) {
-        let create_info = vk::BufferCreateInfo {
-            s_type: vk::StructureType::BUFFER_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::BufferCreateFlags::empty(),
-            size: size,
-            usage: usage,
-            sharing_mode: sharing_mode,
-            queue_family_index_count: queue_family_indices.len() as u32,
-            p_queue_family_indices: queue_family_indices.as_ptr(),
-            ..Default::default()
-        };
-
-        let buffer: vk::Buffer = unsafe { self.device.create_buffer(&create_info, None).unwrap() };
-
-        let mem_requirements: vk::MemoryRequirements =
-            unsafe { self.device.get_buffer_memory_requirements(buffer) };
-
-        let allocate_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            allocation_size: mem_requirements.size,
-            memory_type_index: self.find_memory_type(mem_requirements.memory_type_bits, properties),
-            ..Default::default()
-        };
-
-        let buffer_memory: vk::DeviceMemory =
-            unsafe { self.device.allocate_memory(&allocate_info, None).unwrap() };
-
-        unsafe {
-            self.device
-                .bind_buffer_memory(buffer, buffer_memory, 0)
-                .unwrap();
-        };
-
-        (buffer_memory, buffer)
-    }
-
     pub fn map_memory<T>(
         &self,
         memory: vk::DeviceMemory,
@@ -372,410 +329,27 @@ impl VulkanContext {
         }
     }
 
-    pub fn unmap<T>(&self, memory: vk::DeviceMemory) {
+    pub fn unmap(&self, memory: vk::DeviceMemory) {
         unsafe {
             self.device.unmap_memory(memory);
-        };
-    }
-
-    pub fn copy_buffer(
-        &self,
-        src_buffer: vk::Buffer,
-        dst_buffer: vk::Buffer,
-        size: vk::DeviceSize,
-        transfer_command_buffer: vk::CommandBuffer,
-    ) {
-        let region = vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
-            size: size,
-        };
-
-        unsafe {
-            self.device.cmd_copy_buffer(
-                transfer_command_buffer,
-                src_buffer,
-                dst_buffer,
-                std::slice::from_ref(&region),
-            );
-        };
-
-        // let mut barrier = vk::BufferMemoryBarrier {
-        //     s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
-        //     p_next: ptr::null(),
-        //     src_access_mask: vk::AccessFlags::empty(),
-        //     dst_access_mask: vk::AccessFlags::empty(),
-        //     old_layout: old_layout,
-        //     new_layout: new_layout,
-        //     src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-        //     dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED
-        // };
-    }
-
-    pub fn create_vertex_buffer<T>(
-        &self,
-        vertices: &[T],
-        transfer_command_buffer: vk::CommandBuffer,
-        sharing_mode: vk::SharingMode,
-        queue_family_indices: &[u32],
-    ) -> (vk::DeviceMemory, vk::Buffer) {
-        let buffer_size: vk::DeviceSize = (size_of::<T>() * vertices.len()) as u64;
-        let (staging_buffer_memory, staging_buffer): (vk::DeviceMemory, vk::Buffer) = self
-            .create_buffer(
-                buffer_size,
-                vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                vk::SharingMode::EXCLUSIVE,
-                &[],
-            );
-
-        unsafe {
-            let data_ptr: *mut T = self
-                .device
-                .map_memory(
-                    staging_buffer_memory,
-                    0,
-                    buffer_size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .unwrap() as *mut T;
-            data_ptr.copy_from_nonoverlapping(vertices.as_ptr(), vertices.len());
-            self.device.unmap_memory(staging_buffer_memory);
-        };
-
-        let (vertex_buffer_memory, vertex_buffer): (vk::DeviceMemory, vk::Buffer) = self
-            .create_buffer(
-                buffer_size,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                sharing_mode,
-                queue_family_indices,
-            );
-
-        self.copy_buffer(
-            staging_buffer,
-            vertex_buffer,
-            buffer_size,
-            transfer_command_buffer,
-        );
-
-        unsafe {
-            self.device.destroy_buffer(staging_buffer, None);
-            self.device.free_memory(staging_buffer_memory, None);
         }
-
-        (vertex_buffer_memory, vertex_buffer)
-    }
-
-    pub fn create_index_buffer<T>(
-        &self,
-        indices: &[T],
-        transfer_command_buffer: vk::CommandBuffer,
-        sharing_mode: vk::SharingMode,
-        queue_family_indices: &[u32],
-    ) -> (vk::DeviceMemory, vk::Buffer) {
-        let buffer_size: vk::DeviceSize = (size_of::<T>() * indices.len()) as u64;
-        let (staging_buffer_memory, staging_buffer): (vk::DeviceMemory, vk::Buffer) = self
-            .create_buffer(
-                buffer_size,
-                vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::INDEX_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                vk::SharingMode::EXCLUSIVE,
-                &[],
-            );
-
-        unsafe {
-            let data_ptr: *mut T = self
-                .device
-                .map_memory(
-                    staging_buffer_memory,
-                    0,
-                    buffer_size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .unwrap() as *mut T;
-            data_ptr.copy_from_nonoverlapping(indices.as_ptr(), indices.len());
-            self.device.unmap_memory(staging_buffer_memory);
-        };
-
-        let (index_buffer_memory, index_buffer): (vk::DeviceMemory, vk::Buffer) = self
-            .create_buffer(
-                buffer_size,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                sharing_mode,
-                queue_family_indices,
-            );
-
-        self.copy_buffer(
-            staging_buffer,
-            index_buffer,
-            buffer_size,
-            transfer_command_buffer,
-        );
-
-        unsafe {
-            self.device.destroy_buffer(staging_buffer, None);
-            self.device.free_memory(staging_buffer_memory, None);
-        }
-
-        (index_buffer_memory, index_buffer)
-    }
-
-    pub fn create_shader_module(&self, bytes: &Vec<u8>) -> vk::ShaderModule {
-        let create_info = vk::ShaderModuleCreateInfo {
-            s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ShaderModuleCreateFlags::empty(),
-            code_size: bytes.len(),
-            p_code: bytes.as_ptr() as *const u32,
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .create_shader_module(&create_info, None)
-                .unwrap()
-        }
-    }
-
-    pub fn destroy_shader_module(&self, shader: vk::ShaderModule) {
-        unsafe {
-            self.device.destroy_shader_module(shader, None);
-        };
-    }
-
-    pub fn create_descriptor_pool(
-        &self,
-        pool_sizes: &[vk::DescriptorPoolSize],
-        max_sets: u32,
-    ) -> vk::DescriptorPool {
-        let create_info = vk::DescriptorPoolCreateInfo {
-            s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::DescriptorPoolCreateFlags::empty(),
-            pool_size_count: pool_sizes.len() as u32,
-            p_pool_sizes: pool_sizes.as_ptr(),
-            max_sets: max_sets,
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .create_descriptor_pool(&create_info, None)
-                .unwrap()
-        }
-    }
-
-    pub fn create_descriptor_set_layout(
-        &self,
-        bindings: &[vk::DescriptorSetLayoutBinding],
-    ) -> vk::DescriptorSetLayout {
-        let create_info = vk::DescriptorSetLayoutCreateInfo {
-            s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::DescriptorSetLayoutCreateFlags::empty(),
-            binding_count: bindings.len() as u32,
-            p_bindings: bindings.as_ptr(),
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .create_descriptor_set_layout(&create_info, None)
-                .unwrap()
-        }
-    }
-
-    pub fn create_descriptor_sets(
-        &self,
-        descriptor_pool: vk::DescriptorPool,
-        layouts: &[vk::DescriptorSetLayout],
-    ) -> Vec<vk::DescriptorSet> {
-        let allocate_info = vk::DescriptorSetAllocateInfo {
-            s_type: vk::StructureType::DESCRIPTOR_SET_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            descriptor_pool: descriptor_pool,
-            descriptor_set_count: layouts.len() as u32,
-            p_set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .allocate_descriptor_sets(&allocate_info)
-                .unwrap()
-        }
-    }
-
-    pub fn write_descriptors(
-        &self,
-        writes: &[vk::WriteDescriptorSet],
-        copies: &[vk::CopyDescriptorSet],
-    ) {
-        unsafe {
-            self.device.update_descriptor_sets(&writes, copies);
-        }
-    }
-
-    pub fn create_render_pass(
-        &self,
-        attachments: &[vk::AttachmentDescription],
-        subpasses: &[vk::SubpassDescription],
-        dependencies: &[vk::SubpassDependency],
-    ) -> vk::RenderPass {
-        let render_pass_create_info = vk::RenderPassCreateInfo {
-            s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::RenderPassCreateFlags::empty(),
-            attachment_count: attachments.len() as u32,
-            p_attachments: attachments.as_ptr(),
-            subpass_count: subpasses.len() as u32,
-            p_subpasses: subpasses.as_ptr(),
-            p_dependencies: dependencies.as_ptr(),
-            dependency_count: dependencies.len() as u32,
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .create_render_pass(&render_pass_create_info, None)
-                .unwrap()
-        }
-    }
-
-    pub fn create_image_view(
-        &self,
-        image: vk::Image,
-        format: vk::Format,
-        aspect_mask: vk::ImageAspectFlags,
-    ) -> vk::ImageView {
-        let create_info = vk::ImageViewCreateInfo {
-            s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageViewCreateFlags::empty(),
-            image: image,
-            view_type: vk::ImageViewType::TYPE_2D,
-            format: format,
-            components: vk::ComponentMapping {
-                r: vk::ComponentSwizzle::R,
-                g: vk::ComponentSwizzle::G,
-                b: vk::ComponentSwizzle::B,
-                a: vk::ComponentSwizzle::A,
-            },
-            subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: aspect_mask,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            ..Default::default()
-        };
-
-        unsafe { self.device.create_image_view(&create_info, None).unwrap() }
-    }
-
-    pub fn destroy_image_view(&self, image_view: vk::ImageView) {
-        unsafe { self.device.destroy_image_view(image_view, None) };
-    }
-
-    pub fn destroy_image(&self, image: vk::Image) {
-        unsafe { self.device.destroy_image(image, None) };
     }
 
     pub fn free_memory(&self, memory: vk::DeviceMemory) {
-        unsafe { self.device.free_memory(memory, None) };
+        unsafe {
+            self.device.free_memory(memory, None);
+        }
     }
 
     pub fn destroy_semaphore(&self, semaphore: vk::Semaphore) {
-        unsafe { self.device.destroy_semaphore(semaphore, None) };
+        unsafe {
+            self.device.destroy_semaphore(semaphore, None);
+        }
     }
 
     pub fn destroy_fence(&self, fence: vk::Fence) {
-        unsafe { self.device.destroy_fence(fence, None) };
-    }
-
-
-
-    pub fn create_image(
-        &self,
-        width: u32,
-        height: u32,
-        format: vk::Format,
-        tiling: vk::ImageTiling,
-        usage: vk::ImageUsageFlags,
-        properties: vk::MemoryPropertyFlags,
-        sharing_mode: vk::SharingMode,
-        queue_family_indices: &[u32],
-    ) -> (vk::Image, vk::DeviceMemory) {
-        let create_info = vk::ImageCreateInfo {
-            s_type: vk::StructureType::IMAGE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageCreateFlags::empty(),
-            image_type: vk::ImageType::TYPE_2D,
-            format: format,
-            extent: vk::Extent3D {
-                width: width,
-                height: height,
-                depth: 1,
-            },
-            mip_levels: 1,
-            array_layers: 1,
-            samples: vk::SampleCountFlags::TYPE_1,
-            tiling: tiling,
-            usage: usage,
-            sharing_mode: sharing_mode,
-            queue_family_index_count: queue_family_indices.len() as u32,
-            p_queue_family_indices: queue_family_indices.as_ptr(),
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            ..Default::default()
-        };
-
-        let image: vk::Image = unsafe { self.device.create_image(&create_info, None).unwrap() };
-
-        let mem_requirements: vk::MemoryRequirements =
-            unsafe { self.device.get_image_memory_requirements(image) };
-
-        let allocate_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            allocation_size: mem_requirements.size,
-            memory_type_index: self.find_memory_type(mem_requirements.memory_type_bits, properties),
-            ..Default::default()
-        };
-
-        let image_memory: vk::DeviceMemory =
-            unsafe { self.device.allocate_memory(&allocate_info, None).unwrap() };
-
         unsafe {
-            self.device
-                .bind_image_memory(image, image_memory, 0)
-                .unwrap()
-        };
-
-        (image, image_memory)
-    }
-
-    pub fn create_command_buffers(
-        &self,
-        command_pool: vk::CommandPool,
-        level: vk::CommandBufferLevel,
-        num_buffers: u32,
-    ) -> Vec<vk::CommandBuffer> {
-        let allocate_info = vk::CommandBufferAllocateInfo {
-            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            command_pool: command_pool,
-            level: level,
-            command_buffer_count: num_buffers,
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .allocate_command_buffers(&allocate_info)
-                .unwrap()
+            self.device.destroy_fence(fence, None);
         }
     }
 
@@ -803,267 +377,21 @@ impl VulkanContext {
         vk::Format::UNDEFINED
     }
 
-    pub fn create_pipeline_layout(
-        &self,
-        descriptor_set_layouts: &[vk::DescriptorSetLayout],
-        push_constants: &[vk::PushConstantRange],
-    ) -> vk::PipelineLayout {
-        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
-            s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineLayoutCreateFlags::empty(),
-            set_layout_count: descriptor_set_layouts.len() as u32,
-            p_set_layouts: descriptor_set_layouts.as_ptr(),
-            p_push_constant_ranges: push_constants.as_ptr(),
-            push_constant_range_count: push_constants.len() as u32,
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .create_pipeline_layout(&pipeline_layout_create_info, None)
-                .unwrap()
-        }
-    }
-
-    pub fn create_framebuffer(
-        &self,
-        render_pass: vk::RenderPass,
-        attachments: &[vk::ImageView],
-        extent: vk::Extent2D,
-        layers: u32,
-    ) -> vk::Framebuffer {
-        let create_info = vk::FramebufferCreateInfo {
-            s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::FramebufferCreateFlags::empty(),
-            render_pass: render_pass,
-            attachment_count: attachments.len() as u32,
-            p_attachments: attachments.as_ptr(),
-            width: extent.width,
-            height: extent.height,
-            layers: layers,
-            ..Default::default()
-        };
-
-        unsafe { self.device.create_framebuffer(&create_info, None).unwrap() }
-    }
-
-    pub fn destroy_framebuffer(&self, framebuffer: vk::Framebuffer) {
-        unsafe { self.device.destroy_framebuffer(framebuffer, None) };
-    }
-
-    pub fn destroy_descriptor_pool(&self, descriptor_pool: vk::DescriptorPool) {
-        unsafe { self.device.destroy_descriptor_pool(descriptor_pool, None) };
-    }
-
-    pub fn destroy_descriptor_set_layout(&self, descriptor_set_layout: vk::DescriptorSetLayout) {
-        unsafe {
-            self.device
-                .destroy_descriptor_set_layout(descriptor_set_layout, None)
-        };
-    }
-
-    pub fn destroy_pipeline_layout(&self, pipeline_layout: vk::PipelineLayout) {
-        unsafe { self.device.destroy_pipeline_layout(pipeline_layout, None) };
-    }
-
-    pub fn destroy_pipeline(&self, pipeline: vk::Pipeline) {
-        unsafe { self.device.destroy_pipeline(pipeline, None) };
-    }
-
-    pub fn destroy_render_pass(&self, render_pass: vk::RenderPass) {
-        unsafe { self.device.destroy_render_pass(render_pass, None) };
-    }
-
-    pub fn destroy_buffer(&self, buffer: vk::Buffer) {
-        unsafe { self.device.destroy_buffer(buffer, None) };
-    }
-
     pub fn wait_idle(&self) {
-        unsafe { self.device.device_wait_idle().unwrap() };
-    }
-
-    pub fn create_texture_image(
-        &self,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-        format: vk::Format,
-        tiling: vk::ImageTiling,
-        transfer_command_buffer: vk::CommandBuffer,
-        sharing_mode: vk::SharingMode,
-        queue_family_indices: &[u32],
-    ) -> (vk::Image, vk::DeviceMemory) {
-        let buffer_size: vk::DeviceSize = (size_of::<u8>() * pixels.len()) as u64;
-
-        let (staging_buffer_memory, staging_buffer): (vk::DeviceMemory, vk::Buffer) = self
-            .create_buffer(
-                buffer_size,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                vk::SharingMode::EXCLUSIVE,
-                &[],
-            );
-
         unsafe {
-            let data_ptr: *mut u8 = self
-                .device
-                .map_memory(
-                    staging_buffer_memory,
-                    0,
-                    buffer_size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .unwrap() as *mut u8;
-            data_ptr.copy_from_nonoverlapping(pixels.as_ptr(), pixels.len());
-            self.device.unmap_memory(staging_buffer_memory);
-        };
-
-        let (texture_image, image_memory) = self.create_image(
-            width,
-            height,
-            format,
-            tiling,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            sharing_mode,
-            queue_family_indices,
-        );
-
-        self.transition_image_layout(
-            texture_image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            transfer_command_buffer,
-        );
-        self.copy_buffer_to_image(
-            staging_buffer,
-            texture_image,
-            width,
-            height,
-            transfer_command_buffer,
-        );
-        self.transition_image_layout(
-            texture_image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            transfer_command_buffer,
-        );
-
-        unsafe {
-            self.device.destroy_buffer(staging_buffer, None);
-            self.device.free_memory(staging_buffer_memory, None);
-        };
-
-        (texture_image, image_memory)
-    }
-
-    pub fn transition_image_layout(
-        &self,
-        image: vk::Image,
-        old_layout: vk::ImageLayout,
-        new_layout: vk::ImageLayout,
-        transfer_command_buffer: vk::CommandBuffer,
-    ) {
-        let mut barrier = vk::ImageMemoryBarrier {
-            s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
-            p_next: ptr::null(),
-            src_access_mask: vk::AccessFlags::empty(),
-            dst_access_mask: vk::AccessFlags::empty(),
-            old_layout: old_layout,
-            new_layout: new_layout,
-            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-            image: image,
-            subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_array_layer: 0,
-                base_mip_level: 0,
-                level_count: 1,
-                layer_count: 1,
-            },
-            ..Default::default()
-        };
-
-        let source_stage: vk::PipelineStageFlags;
-        let destination_stage: vk::PipelineStageFlags;
-
-        if old_layout == vk::ImageLayout::UNDEFINED
-            && new_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
-        {
-            barrier.src_access_mask = vk::AccessFlags::empty();
-            barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE;
-
-            source_stage = vk::PipelineStageFlags::TOP_OF_PIPE;
-            destination_stage = vk::PipelineStageFlags::TRANSFER;
-        } else if old_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
-            && new_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-        {
-            barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
-            barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
-
-            source_stage = vk::PipelineStageFlags::TRANSFER;
-            destination_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
-        } else {
-            panic!("unsupported layout transition!");
+            self.device.device_wait_idle().unwrap();
         }
-
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                transfer_command_buffer,
-                source_stage,
-                destination_stage,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                std::slice::from_ref(&barrier),
-            );
-        }
-    }
-
-    pub fn copy_buffer_to_image(
-        &self,
-        buffer: vk::Buffer,
-        image: vk::Image,
-        width: u32,
-        height: u32,
-        transfer_command_buffer: vk::CommandBuffer,
-    ) {
-        let region = vk::BufferImageCopy {
-            buffer_offset: 0,
-            buffer_row_length: 0,
-            buffer_image_height: 0,
-            image_subresource: vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                mip_level: 0,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-            image_extent: vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            },
-        };
-
-        unsafe {
-            self.device.cmd_copy_buffer_to_image(
-                transfer_command_buffer,
-                buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                std::slice::from_ref(&region),
-            );
-        };
     }
 
     pub fn destroy_device(&self) {
-        unsafe { self.device.destroy_device(None) };
+        unsafe {
+            self.device.destroy_device(None);
+        }
     }
 
     pub fn destroy_instance(&self) {
-        unsafe { self.instance.destroy_instance(None) };
+        unsafe {
+            self.instance.destroy_instance(None);
+        }
     }
 }

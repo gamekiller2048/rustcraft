@@ -1,6 +1,6 @@
-#![allow(dead_code, unused_variables, unused_imports)]
+#![allow(dead_code, unused_variables)]
+use ::image::{EncodableLayout, ImageReader};
 use ash::{khr, vk};
-use image::EncodableLayout;
 use nalgebra_glm as glm;
 use std::{
     ffi::{c_char, c_void},
@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime},
     u32,
 };
+use winit::raw_window_handle::HasWindowHandle;
 
 #[cfg(feature = "validation")]
 use ash::ext;
@@ -26,8 +27,11 @@ mod swapchain;
 use swapchain::Swapchain;
 
 mod descriptor_set_layout;
+use descriptor_set_layout::{DescriptorSetLayout, create_descriptor_image_sampler_write};
 use descriptor_set_layout::{DescriptorSetLayoutBuilder, create_descriptor_uniform_buffer_write};
-use winit::raw_window_handle::HasWindowHandle;
+
+mod descriptor_pool;
+use descriptor_pool::DescriptorPool;
 
 mod render_pass;
 use render_pass::RenderPass;
@@ -35,11 +39,28 @@ use render_pass::RenderPass;
 mod buffer;
 use buffer::Buffer;
 
-mod command;
-use command::Command;
-
 mod command_pool;
 use command_pool::CommandPool;
+
+mod shader_module;
+use shader_module::ShaderModule;
+
+mod image;
+use image::Image;
+
+mod pipeline_layout;
+use pipeline_layout::PipelineLayout;
+
+mod pipeline;
+use pipeline::Pipeline;
+
+mod image_view;
+use image_view::ImageView;
+
+mod framebuffer;
+
+mod command_buffer;
+use command_buffer::CommandBuffer;
 
 mod vertex;
 use vertex::Vertex;
@@ -47,158 +68,13 @@ use vertex::Vertex;
 mod frames_in_flight;
 use frames_in_flight::FramesInFlight;
 
-struct MyVertex {
-    pos: glm::Vec3,
-    tex_uv: glm::Vec2,
-}
+mod cube;
+use cube::{INDICES, MyVertex, VERTICES};
 
 struct TransformationData {
     proj_view: glm::Mat4,
     model: glm::Mat4,
 }
-
-impl Vertex for MyVertex {
-    fn get_binding_description() -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: size_of::<MyVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }
-    }
-
-    fn get_attribute_description() -> Vec<vk::VertexInputAttributeDescription> {
-        let attribute_description_pos = vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: 0,
-        };
-
-        let attribute_description_color = vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
-            offset: 3 * size_of::<f32>() as u32,
-        };
-
-        vec![attribute_description_pos, attribute_description_color]
-    }
-}
-
-const VERTICES: [MyVertex; 24] = [
-    // Front face
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, -1.0, 1.0),
-        tex_uv: glm::Vec2::new(0.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, -1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, 1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 1.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, 1.0, 1.0),
-        tex_uv: glm::Vec2::new(0.0, 1.0),
-    },
-    // Back face
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, -1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, -1.0, -1.0),
-        tex_uv: glm::Vec2::new(1.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, 1.0, -1.0),
-        tex_uv: glm::Vec2::new(1.0, 1.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, 1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 1.0),
-    },
-    // Left face
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, -1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, -1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, 1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 1.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, 1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 1.0),
-    },
-    // Right face
-    MyVertex {
-        pos: glm::Vec3::new(1.0, -1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, -1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, 1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 1.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, 1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 1.0),
-    },
-    // Top face
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, 1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, 1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, 1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 1.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, 1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 1.0),
-    },
-    // Bottom face
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, -1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(-1.0, -1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 0.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, -1.0, 1.0),
-        tex_uv: glm::Vec2::new(1.0, 1.0),
-    },
-    MyVertex {
-        pos: glm::Vec3::new(1.0, -1.0, -1.0),
-        tex_uv: glm::Vec2::new(0.0, 1.0),
-    },
-];
-
-const INDICES: [u16; 36] = [
-    // Front face
-    0, 1, 2, 2, 3, 0, // Back face
-    4, 5, 6, 6, 7, 4, // Left face
-    8, 9, 10, 10, 11, 8, // Right face
-    12, 13, 14, 14, 15, 12, // Top face
-    16, 17, 18, 18, 19, 16, // Bottom face
-    20, 21, 22, 22, 23, 20,
-];
 
 const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -231,10 +107,16 @@ struct Renderer {
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
 
-    // vertex_buffer: Buffer,
-    // index_buffer: Buffer,
-    draw_command_pool: CommandPool,
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+
+    texture_image: Image,
+    texture_image_view: ImageView,
+
+    graphics_command_pool: CommandPool,
     draw_command_buffers: Vec<vk::CommandBuffer>,
+
+    transfer_command_pool: CommandPool,
 
     frames: FramesInFlight,
     start_time: Duration,
@@ -439,24 +321,114 @@ impl Renderer {
             present_queue.family_index,
         );
 
-        let uniform_buffer_binding: u32 = 0;
-        let descriptor_set_layout_builder = DescriptorSetLayoutBuilder::new().add_uniform_buffer(
-            uniform_buffer_binding,
-            1,
-            vk::ShaderStageFlags::VERTEX,
+        let graphics_command_pool = CommandPool::new(
+            &context,
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            graphics_queue.queue,
+            graphics_queue.family_index,
         );
 
-        let descriptor_set_layout =
-            context.create_descriptor_set_layout(&descriptor_set_layout_builder.bindings);
+        let initial_transfer_command_buffer = CommandBuffer::new(
+            &context,
+            graphics_command_pool.command_pool,
+            vk::CommandBufferLevel::PRIMARY,
+        );
+
+        initial_transfer_command_buffer
+            .begin(&context, vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        let (vertex_buffer, vertex_staging_buffer) = Buffer::create_vertex_buffer(
+            &context,
+            &VERTICES,
+            initial_transfer_command_buffer.command_buffer,
+            vk::SharingMode::EXCLUSIVE,
+            &[],
+        );
+
+        let (index_buffer, index_staging_buffer) = Buffer::create_index_buffer(
+            &context,
+            &INDICES,
+            initial_transfer_command_buffer.command_buffer,
+            vk::SharingMode::EXCLUSIVE,
+            &[],
+        );
+
+        let image = ImageReader::open("image2.png")
+            .unwrap()
+            .decode()
+            .unwrap()
+            .into_rgba8();
+        let pixels: &[u8] = image.as_bytes();
+
+        let (texture_image, texture_image_staging_buffer) = Image::create_texture_image(
+            &context,
+            pixels,
+            image.width(),
+            image.height(),
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageTiling::OPTIMAL,
+            initial_transfer_command_buffer.command_buffer,
+            vk::SharingMode::EXCLUSIVE,
+            &[],
+        );
+        let texture_image_view = ImageView::new(
+            &context,
+            texture_image.image,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageViewType::TYPE_2D,
+            vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+        );
+
+        initial_transfer_command_buffer.end(&context);
+        graphics_command_pool.submit(
+            &context,
+            slice::from_ref(&initial_transfer_command_buffer.command_buffer),
+            &[],
+            &[],
+            &[],
+            vk::Fence::null(),
+        );
+        graphics_command_pool.wait_queue(&context);
+        graphics_command_pool.free_command_buffers(
+            &context,
+            slice::from_ref(&initial_transfer_command_buffer.command_buffer),
+        );
+
+        vertex_staging_buffer.destroy(&context);
+        index_staging_buffer.destroy(&context);
+        texture_image_staging_buffer.destroy(&context);
+
+        let uniform_buffer_binding: u32 = 0;
+        let uniform_sampler_binding: u32 = 1;
+        let descriptor_set_layout_builder = DescriptorSetLayoutBuilder::new()
+            .add_uniform_buffer(uniform_buffer_binding, 1, vk::ShaderStageFlags::VERTEX)
+            .add_image_sampler(uniform_sampler_binding, 1, vk::ShaderStageFlags::FRAGMENT);
+
+        let descriptor_set_layout = DescriptorSetLayout::create_descriptor_set_layout(
+            &context,
+            &descriptor_set_layout_builder.bindings,
+        );
 
         let max_sets = MAX_FRAMES_IN_FLIGHT as u32;
         let pool_sizes = descriptor_set_layout_builder.calculate_pool_sizes(max_sets);
-        let descriptor_pool = context.create_descriptor_pool(&pool_sizes, max_sets);
+        let descriptor_pool =
+            DescriptorPool::create_descriptor_pool(&context, &pool_sizes, max_sets);
 
         let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> =
             vec![descriptor_set_layout; max_sets as usize];
-        let descriptor_sets =
-            context.create_descriptor_sets(descriptor_pool, &descriptor_set_layouts);
+        let descriptor_sets = DescriptorPool::create_descriptor_sets(
+            &context,
+            descriptor_pool,
+            &descriptor_set_layouts,
+        );
+
+        let sampler = Self::create_texture_sampler(&context);
         let uniform_buffers = Self::create_uniform_buffers(&context);
 
         for i in 0..max_sets as usize {
@@ -474,20 +446,39 @@ impl Renderer {
                 1,
             );
 
-            let descriptor_writes = [buffer_write];
-            context.write_descriptors(&descriptor_writes, &[]);
+            let image_info = vk::DescriptorImageInfo {
+                sampler: sampler,
+                image_view: texture_image_view.image_view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+
+            let image_write = create_descriptor_image_sampler_write(
+                descriptor_sets[i],
+                &image_info,
+                uniform_sampler_binding,
+                0,
+                1,
+            );
+
+            let descriptor_writes: [vk::WriteDescriptorSet; 2] = [buffer_write, image_write];
+
+            DescriptorPool::write_descriptors(&context, &descriptor_writes, &[]);
         }
 
         let render_pass = Self::create_render_pass(&context, swapchain_format.format, depth_format);
 
         swapchain.create_framebuffers(&context, &render_pass);
 
-        let vertex_shader = context.create_shader_module(&fs::read("res/shader.vert.spv").unwrap());
+        let vertex_shader =
+            ShaderModule::create_shader_module(&context, &fs::read("res/shader.vert.spv").unwrap());
         let fragment_shader =
-            context.create_shader_module(&fs::read("res/shader.frag.spv").unwrap());
+            ShaderModule::create_shader_module(&context, &fs::read("res/shader.frag.spv").unwrap());
 
-        let pipeline_layout =
-            context.create_pipeline_layout(slice::from_ref(&descriptor_set_layout), &[]);
+        let pipeline_layout = PipelineLayout::create_pipeline_layout(
+            &context,
+            slice::from_ref(&descriptor_set_layout),
+            &[],
+        );
 
         let graphics_pipeline = Self::create_graphics_pipeline(
             &context,
@@ -498,87 +489,21 @@ impl Renderer {
             render_pass.render_pass,
         );
 
-        context.destroy_shader_module(vertex_shader);
-        context.destroy_shader_module(fragment_shader);
+        ShaderModule::destroy_shader_module(&context, vertex_shader);
+        ShaderModule::destroy_shader_module(&context, fragment_shader);
+
+        let draw_command_buffers = CommandBuffer::create_command_buffers(
+            &context,
+            graphics_command_pool.command_pool,
+            vk::CommandBufferLevel::PRIMARY,
+            MAX_FRAMES_IN_FLIGHT as u32,
+        );
 
         let transfer_command_pool = CommandPool::new(
             &context,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             transfer_queue.queue,
             transfer_queue.family_index,
-        );
-
-        let transfer_command_buffer = context.create_command_buffers(
-            transfer_command_pool.command_pool,
-            vk::CommandBufferLevel::PRIMARY,
-            1,
-        )[0];
-
-        let cmd = Command {
-            context: &context,
-            command_buffer: transfer_command_buffer,
-        };
-
-        cmd.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-        let (vertex_buffer_memory, vertex_buf) = context.create_vertex_buffer(
-            &VERTICES,
-            transfer_command_buffer,
-            vk::SharingMode::EXCLUSIVE,
-            &[],
-        );
-        let vertex_buffer = Buffer {
-            buffer: vertex_buf,
-            memory: vertex_buffer_memory,
-            mapped_memory: ptr::null_mut(),
-        };
-
-        let (index_buffer_memory, index_buf) = context.create_index_buffer(
-            &INDICES,
-            transfer_command_buffer,
-            vk::SharingMode::EXCLUSIVE,
-            &[],
-        );
-        let index_buffer = Buffer {
-            buffer: index_buf,
-            memory: index_buffer_memory,
-            mapped_memory: ptr::null_mut(),
-        };
-
-        // let image = image::ImageReader::open("image2.png").unwrap().decode().unwrap().into_rgba8();
-        // let pixels: &[u8] = image.as_bytes();
-
-        // let (texture_image, texture_image_memory) = context.create_texture_image(pixels, image.width(), image.height(), vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, transfer_command_buffer);
-        // let texture_image_view = context.create_image_view(texture_image, vk::Format::R8G8B8A8_SRGB, vk::ImageAspectFlags::COLOR);
-
-        if graphics_queue.family_index != transfer_queue.family_index {
-            // TODO: transfer ownership from transfer -> graphics
-        }
-
-        cmd.end();
-
-        transfer_command_pool.submit(
-            &context,
-            slice::from_ref(&transfer_command_buffer),
-            &[],
-            &[],
-            &[],
-            vk::Fence::null(),
-        );
-        transfer_command_pool.wait_queue(&context);
-        transfer_command_pool.destroy(&context);
-
-        let draw_command_pool = CommandPool::new(
-            &context,
-            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            graphics_queue.queue,
-            graphics_queue.family_index,
-        );
-
-        let draw_command_buffers = context.create_command_buffers(
-            draw_command_pool.command_pool,
-            vk::CommandBufferLevel::PRIMARY,
-            MAX_FRAMES_IN_FLIGHT as u32,
         );
 
         let frames = FramesInFlight::new(&context, MAX_FRAMES_IN_FLIGHT);
@@ -605,15 +530,50 @@ impl Renderer {
             render_pass,
             pipeline_layout,
             graphics_pipeline,
-            draw_command_pool,
+            graphics_command_pool,
             draw_command_buffers,
-            // vertex_buffer,
-            // index_buffer,
+            vertex_buffer,
+            index_buffer,
+            texture_image,
+            texture_image_view,
+            transfer_command_pool,
             frames,
             start_time: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap(),
         }
+    }
+
+    fn create_texture_sampler(context: &VulkanContext) -> vk::Sampler {
+        let properties: vk::PhysicalDeviceProperties = unsafe {
+            context
+                .instance
+                .get_physical_device_properties(context.physical_device)
+        };
+
+        let create_info = vk::SamplerCreateInfo {
+            s_type: vk::StructureType::SAMPLER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::SamplerCreateFlags::empty(),
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+            address_mode_u: vk::SamplerAddressMode::REPEAT,
+            address_mode_v: vk::SamplerAddressMode::REPEAT,
+            address_mode_w: vk::SamplerAddressMode::REPEAT,
+            mip_lod_bias: properties.limits.max_sampler_lod_bias,
+            anisotropy_enable: vk::TRUE,
+            max_anisotropy: properties.limits.max_sampler_anisotropy,
+            compare_enable: vk::FALSE,
+            compare_op: vk::CompareOp::ALWAYS,
+            min_lod: 0.0,
+            max_lod: 0.0,
+            border_color: vk::BorderColor::INT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+            ..Default::default()
+        };
+
+        unsafe { context.device.create_sampler(&create_info, None).unwrap() }
     }
 
     fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -707,23 +667,13 @@ impl Renderer {
             }
         }
 
-        unsafe {
-            self.context
-                .device
-                .reset_command_buffer(
-                    self.draw_command_buffers[self.frames.curr_frame],
-                    vk::CommandBufferResetFlags::empty(),
-                )
-                .unwrap();
-        }
-
         self.record(image_index);
         self.update_uniform_buffers();
 
         let wait_stages: [vk::PipelineStageFlags; 1] =
             [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
 
-        self.draw_command_pool.submit(
+        self.graphics_command_pool.submit(
             &self.context,
             slice::from_ref(&self.draw_command_buffers[self.frames.curr_frame]),
             slice::from_ref(&self.frames.current_frame().swap_image_available_semaphore),
@@ -765,13 +715,12 @@ impl Renderer {
     }
 
     fn record(&self, swap_image_index: u32) {
-        let cmd = Command {
-            context: &self.context,
+        let cmd = CommandBuffer {
             command_buffer: self.draw_command_buffers[self.frames.curr_frame],
         };
 
-        cmd.reset();
-        cmd.begin(vk::CommandBufferUsageFlags::empty());
+        cmd.reset(&self.context);
+        cmd.begin(&self.context, vk::CommandBufferUsageFlags::empty());
 
         let clear_values: [vk::ClearValue; 2] = [
             vk::ClearValue {
@@ -793,6 +742,7 @@ impl Renderer {
         };
 
         cmd.begin_render_pass(
+            &self.context,
             self.render_pass.render_pass,
             self.swapchain.framebuffers[swap_image_index as usize],
             &render_area,
@@ -800,14 +750,24 @@ impl Renderer {
             vk::SubpassContents::INLINE,
         );
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, self.graphics_pipeline);
+        cmd.bind_pipeline(
+            &self.context,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.graphics_pipeline,
+        );
 
-        //     cmd.bind_vertex_buffers(
-        //         0,
-        //         slice::from_ref(&self.vertex_buffer.buffer),
-        //         slice::from_ref(&0),
-        //     );
-        //     cmd.bind_index_buffer(self.index_buffer.buffer, 0, vk::IndexType::UINT16);
+        cmd.bind_vertex_buffers(
+            &self.context,
+            0,
+            slice::from_ref(&self.vertex_buffer.buffer),
+            slice::from_ref(&0),
+        );
+        cmd.bind_index_buffer(
+            &self.context,
+            self.index_buffer.buffer,
+            0,
+            vk::IndexType::UINT16,
+        );
 
         let viewport = vk::Viewport {
             x: 0.0,
@@ -823,7 +783,11 @@ impl Renderer {
             extent: self.swapchain.extent,
         };
 
-        cmd.set_viewports_scissors(slice::from_ref(&viewport), slice::from_ref(&scissor));
+        cmd.set_viewports_scissors(
+            &self.context,
+            slice::from_ref(&viewport),
+            slice::from_ref(&scissor),
+        );
 
         unsafe {
             self.context.device.cmd_bind_descriptor_sets(
@@ -834,18 +798,18 @@ impl Renderer {
                 slice::from_ref(&self.descriptor_sets[self.frames.curr_frame]),
                 &[],
             );
-            //         self.context.device.cmd_draw_indexed(
-            //             cmd.command_buffer,
-            //             INDICES.len() as u32,
-            //             1,
-            //             0,
-            //             0,
-            //             0,
-            //         );
+            self.context.device.cmd_draw_indexed(
+                cmd.command_buffer,
+                INDICES.len() as u32,
+                1,
+                0,
+                0,
+                0,
+            );
         }
 
-        cmd.end_render_pass();
-        cmd.end();
+        cmd.end_render_pass(&self.context);
+        cmd.end(&self.context);
     }
 
     fn create_render_pass(
@@ -919,17 +883,15 @@ impl Renderer {
         };
 
         let attachments: [vk::AttachmentDescription; 2] = [color_attachment, depth_attachment];
-        let render_pass = context.create_render_pass(
+
+        RenderPass::new(
+            &context,
             &attachments,
             slice::from_ref(&subpass),
             slice::from_ref(&dependency),
-        );
-
-        RenderPass {
-            render_pass,
-            color_attachment_index: color_attachment_ref.attachment,
-            depth_attachment_index: depth_attachment_ref.attachment,
-        }
+            color_attachment_ref.attachment,
+            depth_attachment_ref.attachment,
+        )
     }
 
     fn create_graphics_pipeline(
@@ -1162,7 +1124,8 @@ impl Renderer {
         let mut uniform_buffers: Vec<Buffer> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buffer_memory, buffer) = context.create_buffer(
+            let (buffer_memory, buffer) = Buffer::create_buffer(
+                &context,
                 buffer_size,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -1199,23 +1162,30 @@ impl Drop for Renderer {
             self.context
                 .destroy_fence(self.frames.frames[i].in_flight_fence);
 
-            self.context.destroy_buffer(self.uniform_buffers[i].buffer);
-            self.context.free_memory(self.uniform_buffers[i].memory);
+            self.uniform_buffers[i].destroy(&self.context);
         }
 
-        self.draw_command_pool.destroy(&self.context);
+        DescriptorPool::destroy_descriptor_pool(&self.context, self.descriptor_pool);
+        DescriptorSetLayout::destroy_descriptor_set_layout(
+            &self.context,
+            self.descriptor_set_layout,
+        );
 
-        self.context.destroy_descriptor_pool(self.descriptor_pool);
-        self.context
-            .destroy_descriptor_set_layout(self.descriptor_set_layout);
+        PipelineLayout::destroy_pipeline_layout(&self.context, self.pipeline_layout);
+        Pipeline::destroy_pipeline(&self.context, self.graphics_pipeline);
+        self.render_pass.destroy(&self.context);
 
-        self.context.destroy_pipeline_layout(self.pipeline_layout);
-        self.context.destroy_pipeline(self.graphics_pipeline);
-        self.context
-            .destroy_render_pass(self.render_pass.render_pass);
+        self.vertex_buffer.destroy(&self.context);
+        self.index_buffer.destroy(&self.context);
+
+        self.texture_image_view.destroy(&self.context);
+        self.texture_image.destroy(&self.context);
+
+        self.graphics_command_pool.destroy(&self.context);
+        self.transfer_command_pool.destroy(&self.context);
 
         self.swapchain.destroy(&self.context);
-        unsafe { self.surface_loader.destroy_surface(self.surface, None) };
+        unsafe { self.surface_loader.destroy_surface(self.surface, None) }
         self.context.destroy_device();
         self.context.destroy_instance();
     }
@@ -1270,6 +1240,8 @@ impl winit::application::ApplicationHandler for App {
 }
 
 fn main() {
+    env_logger::init();
+
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 

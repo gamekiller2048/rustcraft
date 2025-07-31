@@ -3,6 +3,9 @@ use std::ptr;
 use super::vulkan_context::VulkanContext;
 use ash::vk;
 
+use super::framebuffer::Framebuffer;
+use super::image::Image;
+use super::image_view::ImageView;
 use super::render_pass::RenderPass;
 
 pub struct Swapchain {
@@ -52,16 +55,28 @@ impl Swapchain {
         let mut image_views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
 
         for image in images.iter() {
-            image_views.push(context.create_image_view(
+            image_views.push(ImageView::create_image_view(
+                context,
                 *image,
                 format.format,
-                vk::ImageAspectFlags::COLOR,
+                vk::ImageViewType::TYPE_2D,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
             ));
         }
 
-        let (depth_image, depth_image_memory) = context.create_image(
+        let (depth_image, depth_image_memory) = Image::create_image(
+            &context,
             extent.width,
             extent.height,
+            1,
+            1,
+            1,
             depth_format,
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -70,8 +85,19 @@ impl Swapchain {
             &queue_family_indices,
         );
 
-        let depth_image_view =
-            context.create_image_view(depth_image, depth_format, vk::ImageAspectFlags::DEPTH);
+        let depth_image_view = ImageView::create_image_view(
+            context,
+            depth_image,
+            depth_format,
+            vk::ImageViewType::TYPE_2D,
+            vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+        );
 
         Self {
             swapchain,
@@ -93,11 +119,11 @@ impl Swapchain {
 
     pub fn destory_without_depth(&self, context: &VulkanContext) {
         for framebuffer in self.framebuffers.iter() {
-            context.destroy_framebuffer(*framebuffer);
+            Framebuffer::destroy_framebuffer(&context, *framebuffer);
         }
 
         for image_view in self.image_views.iter() {
-            context.destroy_image_view(*image_view);
+            ImageView::destroy_image_view(context, *image_view);
         }
 
         Self::destroy_swapchain(context, self.swapchain);
@@ -105,8 +131,8 @@ impl Swapchain {
 
     pub fn destroy(&self, context: &VulkanContext) {
         self.destory_without_depth(context);
-        context.destroy_image_view(self.depth_image_view);
-        context.destroy_image(self.depth_image);
+        ImageView::destroy_image_view(context, self.depth_image_view);
+        Image::destroy_image(&context, self.depth_image);
         context.free_memory(self.depth_image_memory);
     }
 
@@ -126,16 +152,28 @@ impl Swapchain {
         self.image_views.clear();
 
         for image in self.images.iter() {
-            self.image_views.push(context.create_image_view(
+            self.image_views.push(ImageView::create_image_view(
+                context,
                 *image,
                 self.format.format,
-                vk::ImageAspectFlags::COLOR,
+                vk::ImageViewType::TYPE_2D,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
             ));
         }
 
-        (self.depth_image, self.depth_image_memory) = context.create_image(
+        (self.depth_image, self.depth_image_memory) = Image::create_image(
+            &context,
             self.extent.width,
             self.extent.height,
+            1,
+            1,
+            1,
             self.depth_format,
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -143,10 +181,18 @@ impl Swapchain {
             self.sharing_mode,
             &queue_family_indices,
         );
-        self.depth_image_view = context.create_image_view(
+        self.depth_image_view = ImageView::create_image_view(
+            context,
             self.depth_image,
             self.depth_format,
-            vk::ImageAspectFlags::DEPTH,
+            vk::ImageViewType::TYPE_2D,
+            vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
         );
     }
 
@@ -159,7 +205,8 @@ impl Swapchain {
             attachments[render_pass.color_attachment_index as usize] = *image_view;
             attachments[render_pass.depth_attachment_index as usize] = self.depth_image_view;
 
-            self.framebuffers.push(context.create_framebuffer(
+            self.framebuffers.push(Framebuffer::create_framebuffer(
+                &context,
                 render_pass.render_pass,
                 &attachments,
                 self.extent,
@@ -182,7 +229,7 @@ impl Swapchain {
             image_count = context.swapchain_details.capabilities.min_image_count;
         }
 
-        let mut create_info = vk::SwapchainCreateInfoKHR {
+        let create_info = vk::SwapchainCreateInfoKHR {
             s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
             p_next: ptr::null(),
             min_image_count: image_count,
@@ -222,6 +269,8 @@ impl Swapchain {
     }
 
     pub fn destroy_swapchain(context: &VulkanContext, swapchain: vk::SwapchainKHR) {
-        unsafe { context.swapchain_loader.destroy_swapchain(swapchain, None) };
+        unsafe {
+            context.swapchain_loader.destroy_swapchain(swapchain, None);
+        }
     }
 }

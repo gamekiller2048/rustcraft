@@ -15,20 +15,7 @@ impl CommandPool {
         queue: vk::Queue,
         queue_family_index: u32,
     ) -> Self {
-        let create_info = vk::CommandPoolCreateInfo {
-            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: flags,
-            queue_family_index: queue_family_index,
-            ..Default::default()
-        };
-
-        let command_pool = unsafe {
-            context
-                .device
-                .create_command_pool(&create_info, None)
-                .unwrap()
-        };
+        let command_pool = Self::create_command_pool(context, flags, queue, queue_family_index);
 
         Self {
             command_pool,
@@ -36,8 +23,20 @@ impl CommandPool {
         }
     }
 
+    pub fn free_command_buffers(
+        &self,
+        context: &VulkanContext,
+        command_buffers: &[vk::CommandBuffer],
+    ) {
+        unsafe {
+            context
+                .device
+                .free_command_buffers(self.command_pool, command_buffers);
+        }
+    }
+
     pub fn destroy(&self, context: &VulkanContext) {
-        unsafe { context.device.destroy_command_pool(self.command_pool, None) };
+        Self::destroy_command_pool(context, self.command_pool);
     }
 
     pub fn submit(
@@ -66,11 +65,43 @@ impl CommandPool {
             context
                 .device
                 .queue_submit(self.queue, std::slice::from_ref(&submit_info), fence)
-                .unwrap()
-        };
+                .unwrap();
+        }
     }
 
     pub fn wait_queue(&self, context: &VulkanContext) {
-        unsafe { context.device.queue_wait_idle(self.queue).unwrap() };
+        unsafe {
+            context.device.queue_wait_idle(self.queue).unwrap();
+        }
+    }
+
+    pub fn create_command_pool(
+        context: &VulkanContext,
+        flags: vk::CommandPoolCreateFlags,
+        queue: vk::Queue,
+        queue_family_index: u32,
+    ) -> vk::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo {
+            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: flags,
+            queue_family_index: queue_family_index,
+            ..Default::default()
+        };
+
+        let command_pool = unsafe {
+            context
+                .device
+                .create_command_pool(&create_info, None)
+                .unwrap()
+        };
+
+        command_pool
+    }
+
+    pub fn destroy_command_pool(context: &VulkanContext, command_pool: vk::CommandPool) {
+        unsafe {
+            context.device.destroy_command_pool(command_pool, None);
+        }
     }
 }
