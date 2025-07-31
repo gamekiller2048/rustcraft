@@ -1,41 +1,57 @@
-use std::ptr;
 use ash::vk;
+use std::ptr;
 
 use super::vulkan_context::VulkanContext;
 
 pub struct Command<'a> {
     pub context: &'a VulkanContext,
-    pub command_buffer: vk::CommandBuffer
+    pub command_buffer: vk::CommandBuffer,
 }
 
 impl<'a> Command<'a> {
     pub fn reset(&self) {
         unsafe {
-            self.context.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty()).unwrap();
+            self.context
+                .device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .unwrap();
         }
     }
-    
-    pub fn begin(&self) {
+
+    pub fn begin(&self, flags: vk::CommandBufferUsageFlags) {
         let begin_info = vk::CommandBufferBeginInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
             p_next: ptr::null(),
-            flags: vk::CommandBufferUsageFlags::empty(),
+            flags: flags,
             p_inheritance_info: ptr::null(),
             ..Default::default()
         };
 
         unsafe {
-            self.context.device.begin_command_buffer(self.command_buffer, &begin_info).unwrap()
+            self.context
+                .device
+                .begin_command_buffer(self.command_buffer, &begin_info)
+                .unwrap()
         };
     }
 
     pub fn end(&self) {
         unsafe {
-            self.context.device.end_command_buffer(self.command_buffer).unwrap()
+            self.context
+                .device
+                .end_command_buffer(self.command_buffer)
+                .unwrap()
         };
     }
 
-    pub fn begin_render_pass(&self, render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, render_area: &vk::Rect2D, clear_values: &[vk::ClearValue], contents: vk::SubpassContents) {
+    pub fn begin_render_pass(
+        &self,
+        render_pass: vk::RenderPass,
+        framebuffer: vk::Framebuffer,
+        render_area: &vk::Rect2D,
+        clear_values: &[vk::ClearValue],
+        contents: vk::SubpassContents,
+    ) {
         let begin_info = vk::RenderPassBeginInfo {
             s_type: vk::StructureType::RENDER_PASS_BEGIN_INFO,
             p_next: ptr::null(),
@@ -48,38 +64,91 @@ impl<'a> Command<'a> {
         };
 
         unsafe {
-            self.context.device.cmd_begin_render_pass(self.command_buffer, &begin_info, contents)
+            self.context
+                .device
+                .cmd_begin_render_pass(self.command_buffer, &begin_info, contents)
         };
     }
 
     pub fn end_render_pass(&self) {
+        unsafe { self.context.device.cmd_end_render_pass(self.command_buffer) };
+    }
+
+    pub fn bind_pipeline(
+        &self,
+        pipeline_bind_point: vk::PipelineBindPoint,
+        graphics_pipeline: vk::Pipeline,
+    ) {
         unsafe {
-            self.context.device.cmd_end_render_pass(self.command_buffer)
+            self.context.device.cmd_bind_pipeline(
+                self.command_buffer,
+                pipeline_bind_point,
+                graphics_pipeline,
+            )
         };
     }
 
-    pub fn bind_pipeline(&self, pipeline_bind_point: vk::PipelineBindPoint, graphics_pipeline: vk::Pipeline) {
+    pub fn bind_vertex_buffers(
+        &self,
+        first_binding: u32,
+        vertex_buffers: &[vk::Buffer],
+        offsets: &[vk::DeviceSize],
+    ) {
         unsafe {
-            self.context.device.cmd_bind_pipeline(self.command_buffer, pipeline_bind_point, graphics_pipeline)
+            self.context.device.cmd_bind_vertex_buffers(
+                self.command_buffer,
+                first_binding,
+                vertex_buffers,
+                offsets,
+            )
         };
     }
 
-    pub fn bind_vertex_buffers(&self, first_binding: u32, vertex_buffers: &[vk::Buffer], offsets: &[vk::DeviceSize]) {
+    pub fn bind_index_buffer(
+        &self,
+        index_buffers: vk::Buffer,
+        offsets: vk::DeviceSize,
+        index_type: vk::IndexType,
+    ) {
         unsafe {
-            self.context.device.cmd_bind_vertex_buffers(self.command_buffer, first_binding, vertex_buffers, offsets)
+            self.context.device.cmd_bind_index_buffer(
+                self.command_buffer,
+                index_buffers,
+                offsets,
+                index_type,
+            )
         };
     }
 
-    pub fn bind_index_buffer(&self, index_buffers: vk::Buffer, offsets: vk::DeviceSize, index_type: vk::IndexType) {
-        unsafe {
-            self.context.device.cmd_bind_index_buffer(self.command_buffer, index_buffers, offsets, index_type)
-        };
-    }
-    
     pub fn set_viewports_scissors(&self, viewports: &[vk::Viewport], scissors: &[vk::Rect2D]) {
         unsafe {
-            self.context.device.cmd_set_viewport(self.command_buffer, 0, viewports);
-            self.context.device.cmd_set_scissor(self.command_buffer, 0, scissors);
+            self.context
+                .device
+                .cmd_set_viewport(self.command_buffer, 0, viewports);
+            self.context
+                .device
+                .cmd_set_scissor(self.command_buffer, 0, scissors);
+        };
+    }
+
+    pub fn pipeline_barrier(
+        &self,
+        src_stage: vk::PipelineStageFlags,
+        dst_stage: vk::PipelineStageFlags,
+        memory_barriers: &[vk::MemoryBarrier],
+        buffer_memory_barriers: &[vk::BufferMemoryBarrier],
+        image_memory_barriers: &[vk::ImageMemoryBarrier],
+    ) {
+        unsafe {
+            self.context.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                memory_barriers,
+                buffer_memory_barriers,
+                image_memory_barriers,
+            )
         };
     }
 }

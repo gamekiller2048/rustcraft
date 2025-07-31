@@ -1,0 +1,76 @@
+use ash::vk;
+use std::ptr;
+
+use super::vulkan_context::VulkanContext;
+
+pub struct CommandPool {
+    pub command_pool: vk::CommandPool,
+    pub queue: vk::Queue,
+}
+
+impl CommandPool {
+    pub fn new(
+        context: &VulkanContext,
+        flags: vk::CommandPoolCreateFlags,
+        queue: vk::Queue,
+        queue_family_index: u32,
+    ) -> Self {
+        let create_info = vk::CommandPoolCreateInfo {
+            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: flags,
+            queue_family_index: queue_family_index,
+            ..Default::default()
+        };
+
+        let command_pool = unsafe {
+            context
+                .device
+                .create_command_pool(&create_info, None)
+                .unwrap()
+        };
+
+        Self {
+            command_pool,
+            queue,
+        }
+    }
+
+    pub fn destroy(&self, context: &VulkanContext) {
+        unsafe { context.device.destroy_command_pool(self.command_pool, None) };
+    }
+
+    pub fn submit(
+        &self,
+        context: &VulkanContext,
+        command_buffers: &[vk::CommandBuffer],
+        wait_semaphores: &[vk::Semaphore],
+        wait_stages: &[vk::PipelineStageFlags],
+        signal_semaphores: &[vk::Semaphore],
+        fence: vk::Fence,
+    ) {
+        let submit_info = vk::SubmitInfo {
+            s_type: vk::StructureType::SUBMIT_INFO,
+            p_next: ptr::null(),
+            wait_semaphore_count: wait_semaphores.len() as u32,
+            p_wait_semaphores: wait_semaphores.as_ptr(),
+            p_wait_dst_stage_mask: wait_stages.as_ptr(),
+            command_buffer_count: command_buffers.len() as u32,
+            p_command_buffers: command_buffers.as_ptr(),
+            signal_semaphore_count: signal_semaphores.len() as u32,
+            p_signal_semaphores: signal_semaphores.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe {
+            context
+                .device
+                .queue_submit(self.queue, std::slice::from_ref(&submit_info), fence)
+                .unwrap()
+        };
+    }
+
+    pub fn wait_queue(&self, context: &VulkanContext) {
+        unsafe { context.device.queue_wait_idle(self.queue).unwrap() };
+    }
+}
