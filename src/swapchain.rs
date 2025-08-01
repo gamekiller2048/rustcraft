@@ -39,6 +39,7 @@ impl Swapchain {
         sharing_mode: vk::SharingMode,
         graphics_queue_index: u32,
         present_queue_index: u32,
+        render_pass: &RenderPass,
     ) -> Self {
         let queue_family_indices: [u32; 2] = [graphics_queue_index, present_queue_index];
 
@@ -50,26 +51,125 @@ impl Swapchain {
             extent,
             sharing_mode,
             &queue_family_indices,
+            vk::SwapchainKHR::null(),
         );
 
-        let mut image_views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
+        let image_views = Self::create_image_views(context, &images, format.format);
 
-        for image in images.iter() {
-            image_views.push(ImageView::create_image_view(
-                context,
-                *image,
-                format.format,
-                vk::ImageViewType::TYPE_2D,
-                vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-            ));
+        let (depth_image, depth_image_memory, depth_image_view) = Self::create_depth_resources(
+            context,
+            &images,
+            extent,
+            depth_format,
+            sharing_mode,
+            &queue_family_indices,
+        );
+
+        let framebuffers =
+            Self::create_framebuffers(context, extent, &image_views, depth_image_view, render_pass);
+
+        Self {
+            swapchain,
+            images,
+            image_views,
+            extent,
+            format,
+            present_mode,
+            depth_image,
+            depth_image_memory,
+            depth_image_view,
+            depth_format,
+            framebuffers,
+            sharing_mode,
+            graphics_queue_index,
+            present_queue_index,
+        }
+    }
+
+    pub fn destroy(&self, context: &VulkanContext) {
+        for framebuffer in self.framebuffers.iter() {
+            Framebuffer::destroy_framebuffer(&context, *framebuffer);
         }
 
+        for image_view in self.image_views.iter() {
+            ImageView::destroy_image_view(context, *image_view);
+        }
+
+        Self::destroy_swapchain(context, self.swapchain);
+
+        ImageView::destroy_image_view(context, self.depth_image_view);
+        Image::destroy_image(&context, self.depth_image);
+        context.free_memory(self.depth_image_memory);
+    }
+
+    pub fn recreate(
+        &mut self,
+        context: &VulkanContext,
+        surface: vk::SurfaceKHR,
+        extent: vk::Extent2D,
+        render_pass: &RenderPass,
+    ) {
+        let queue_family_indices: [u32; 2] = [self.graphics_queue_index, self.present_queue_index];
+
+        self.extent = extent;
+
+        Self::destroy_swapchain(context, self.swapchain);
+
+        (self.swapchain, self.images) = Self::create_swapchain(
+            context,
+            surface,
+            self.format,
+            self.present_mode,
+            self.extent,
+            self.sharing_mode,
+            &queue_family_indices,
+            vk::SwapchainKHR::null(), // TODO: use
+        );
+
+        for image_view in self.image_views.iter() {
+            ImageView::destroy_image_view(context, *image_view);
+        }
+
+        self.image_views = Self::create_image_views(context, &self.images, self.format.format);
+
+        ImageView::destroy_image_view(context, self.depth_image_view);
+        Image::destroy_image(&context, self.depth_image);
+        context.free_memory(self.depth_image_memory);
+
+        (
+            self.depth_image,
+            self.depth_image_memory,
+            self.depth_image_view,
+        ) = Self::create_depth_resources(
+            context,
+            &self.images,
+            self.extent,
+            self.depth_format,
+            self.sharing_mode,
+            &queue_family_indices,
+        );
+
+        for framebuffer in self.framebuffers.iter() {
+            Framebuffer::destroy_framebuffer(&context, *framebuffer);
+        }
+
+        self.framebuffers = Self::create_framebuffers(
+            context,
+            self.extent,
+            &self.image_views,
+            self.depth_image_view,
+            render_pass,
+        );
+    }
+
+    fn create_depth_resources(
+        context: &VulkanContext,
+        images: &Vec<vk::Image>,
+        extent: vk::Extent2D,
+        depth_format: vk::Format,
+        sharing_mode: vk::SharingMode,
+        queue_family_indices: &[u32],
+    ) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
         let (depth_image, depth_image_memory) = Image::create_image(
             &context,
             extent.width,
@@ -99,63 +199,21 @@ impl Swapchain {
             },
         );
 
-        Self {
-            swapchain,
-            images,
-            image_views,
-            extent,
-            format,
-            present_mode,
-            depth_image,
-            depth_image_memory,
-            depth_image_view,
-            depth_format,
-            framebuffers: vec![],
-            sharing_mode,
-            graphics_queue_index,
-            present_queue_index,
-        }
+        (depth_image, depth_image_memory, depth_image_view)
     }
 
-    pub fn destory_without_depth(&self, context: &VulkanContext) {
-        for framebuffer in self.framebuffers.iter() {
-            Framebuffer::destroy_framebuffer(&context, *framebuffer);
-        }
+    fn create_image_views(
+        context: &VulkanContext,
+        images: &Vec<vk::Image>,
+        format: vk::Format,
+    ) -> Vec<vk::ImageView> {
+        let mut image_views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
 
-        for image_view in self.image_views.iter() {
-            ImageView::destroy_image_view(context, *image_view);
-        }
-
-        Self::destroy_swapchain(context, self.swapchain);
-    }
-
-    pub fn destroy(&self, context: &VulkanContext) {
-        self.destory_without_depth(context);
-        ImageView::destroy_image_view(context, self.depth_image_view);
-        Image::destroy_image(&context, self.depth_image);
-        context.free_memory(self.depth_image_memory);
-    }
-
-    pub fn recreate(&mut self, context: &VulkanContext, surface: vk::SurfaceKHR) {
-        let queue_family_indices: [u32; 2] = [self.graphics_queue_index, self.present_queue_index];
-
-        (self.swapchain, self.images) = Self::create_swapchain(
-            context,
-            surface,
-            self.format,
-            self.present_mode,
-            self.extent,
-            self.sharing_mode,
-            &queue_family_indices,
-        );
-
-        self.image_views.clear();
-
-        for image in self.images.iter() {
-            self.image_views.push(ImageView::create_image_view(
+        for image in images.iter() {
+            image_views.push(ImageView::create_image_view(
                 context,
                 *image,
-                self.format.format,
+                format,
                 vk::ImageViewType::TYPE_2D,
                 vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -167,52 +225,34 @@ impl Swapchain {
             ));
         }
 
-        (self.depth_image, self.depth_image_memory) = Image::create_image(
-            &context,
-            self.extent.width,
-            self.extent.height,
-            1,
-            1,
-            1,
-            self.depth_format,
-            vk::ImageTiling::OPTIMAL,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            self.sharing_mode,
-            &queue_family_indices,
-        );
-        self.depth_image_view = ImageView::create_image_view(
-            context,
-            self.depth_image,
-            self.depth_format,
-            vk::ImageViewType::TYPE_2D,
-            vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-        );
+        image_views
     }
 
-    pub fn create_framebuffers(&mut self, context: &VulkanContext, render_pass: &RenderPass) {
-        self.framebuffers = Vec::with_capacity(self.image_views.len());
+    fn create_framebuffers(
+        context: &VulkanContext,
+        extent: vk::Extent2D,
+        image_views: &Vec<vk::ImageView>,
+        depth_image_view: vk::ImageView,
+        render_pass: &RenderPass,
+    ) -> Vec<vk::Framebuffer> {
+        let mut framebuffers = Vec::with_capacity(image_views.len());
 
-        for image_view in self.image_views.iter() {
+        for image_view in image_views.iter() {
             let mut attachments: [vk::ImageView; 2] = [vk::ImageView::null(); 2];
 
             attachments[render_pass.color_attachment_index as usize] = *image_view;
-            attachments[render_pass.depth_attachment_index as usize] = self.depth_image_view;
+            attachments[render_pass.depth_attachment_index as usize] = depth_image_view;
 
-            self.framebuffers.push(Framebuffer::create_framebuffer(
+            framebuffers.push(Framebuffer::create_framebuffer(
                 &context,
                 render_pass.render_pass,
                 &attachments,
-                self.extent,
+                extent,
                 1,
             ));
         }
+
+        framebuffers
     }
 
     pub fn create_swapchain(
@@ -223,6 +263,7 @@ impl Swapchain {
         extent: vk::Extent2D,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
+        old_swapchain: vk::SwapchainKHR,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>) {
         let mut image_count: u32 = context.swapchain_details.capabilities.min_image_count + 1;
         if image_count > context.swapchain_details.capabilities.max_image_count {
@@ -244,7 +285,7 @@ impl Swapchain {
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
             present_mode: present_mode,
             clipped: vk::TRUE,
-            old_swapchain: vk::SwapchainKHR::null(), // TODO: use this for swapchain recreation without interupt,
+            old_swapchain: old_swapchain,
             image_sharing_mode: sharing_mode,
             queue_family_index_count: queue_family_indices.len() as u32,
             p_queue_family_indices: queue_family_indices.as_ptr(),

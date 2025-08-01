@@ -101,6 +101,7 @@ struct Renderer {
     descriptor_sets: Vec<vk::DescriptorSet>,
 
     uniform_buffers: Vec<Buffer>,
+    sampler: vk::Sampler,
 
     render_pass: RenderPass,
 
@@ -305,22 +306,6 @@ impl Renderer {
 
         let depth_format = Self::find_depth_format(&context);
 
-        let mut swapchain = Swapchain::new(
-            &context,
-            surface,
-            swapchain_format,
-            swapchain_present_mode,
-            swapchain_extent,
-            depth_format,
-            if graphics_queue.family_index == present_queue.family_index {
-                vk::SharingMode::EXCLUSIVE
-            } else {
-                vk::SharingMode::CONCURRENT
-            },
-            graphics_queue.family_index,
-            present_queue.family_index,
-        );
-
         let graphics_command_pool = CommandPool::new(
             &context,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
@@ -428,8 +413,8 @@ impl Renderer {
             &descriptor_set_layouts,
         );
 
-        let sampler = Self::create_texture_sampler(&context);
         let uniform_buffers = Self::create_uniform_buffers(&context);
+        let sampler = Self::create_texture_sampler(&context);
 
         for i in 0..max_sets as usize {
             let buffer_info = vk::DescriptorBufferInfo {
@@ -467,7 +452,22 @@ impl Renderer {
 
         let render_pass = Self::create_render_pass(&context, swapchain_format.format, depth_format);
 
-        swapchain.create_framebuffers(&context, &render_pass);
+        let mut swapchain = Swapchain::new(
+            &context,
+            surface,
+            swapchain_format,
+            swapchain_present_mode,
+            swapchain_extent,
+            depth_format,
+            if graphics_queue.family_index == present_queue.family_index {
+                vk::SharingMode::EXCLUSIVE
+            } else {
+                vk::SharingMode::CONCURRENT
+            },
+            graphics_queue.family_index,
+            present_queue.family_index,
+            &render_pass,
+        );
 
         let vertex_shader =
             ShaderModule::create_shader_module(&context, &fs::read("res/shader.vert.spv").unwrap());
@@ -527,6 +527,7 @@ impl Renderer {
             descriptor_pool,
             descriptor_sets,
             uniform_buffers,
+            sampler,
             render_pass,
             pipeline_layout,
             graphics_pipeline,
@@ -579,11 +580,15 @@ impl Renderer {
     fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         self.context.wait_idle();
 
-        self.swapchain.destory_without_depth(&self.context);
-        self.swapchain.recreate(&self.context, self.surface);
-
-        self.swapchain
-            .create_framebuffers(&self.context, &self.render_pass);
+        self.swapchain.recreate(
+            &self.context,
+            self.surface,
+            vk::Extent2D {
+                width: size.width,
+                height: size.height,
+            },
+            &self.render_pass,
+        );
     }
 
     fn update_uniform_buffers(&self) {
@@ -633,13 +638,9 @@ impl Renderer {
                     u64::MAX,
                 )
                 .unwrap();
-            self.context
-                .device
-                .reset_fences(std::slice::from_ref(
-                    &self.frames.current_frame().in_flight_fence,
-                ))
-                .unwrap();
         }
+
+        let size = window.inner_size();
 
         let result = unsafe {
             self.context.swapchain_loader.acquire_next_image(
@@ -654,17 +655,30 @@ impl Renderer {
 
         match result {
             Ok(value) => {
+                if window_resized || value.1 {
+                    self.recreate_swapchain(size);
+                    return;
+                }
+
                 image_index = value.0;
             }
             Err(error) => {
-                if error == vk::Result::ERROR_OUT_OF_DATE_KHR || window_resized {
-                    let size = window.inner_size();
+                if error == vk::Result::ERROR_OUT_OF_DATE_KHR {
                     self.recreate_swapchain(size);
                     return;
-                } else if error != vk::Result::SUCCESS && error != vk::Result::SUBOPTIMAL_KHR {
-                    panic!("failed to acquire swap chain image!");
                 }
+
+                panic!("failed to acquire swap chain image!");
             }
+        }
+
+        unsafe {
+            self.context
+                .device
+                .reset_fences(std::slice::from_ref(
+                    &self.frames.current_frame().in_flight_fence,
+                ))
+                .unwrap();
         }
 
         self.record(image_index);
@@ -703,12 +717,14 @@ impl Renderer {
         if result.is_err() {
             let error: vk::Result = result.unwrap_err();
 
-            if error == vk::Result::ERROR_OUT_OF_DATE_KHR || window_resized {
-                let size = window.inner_size();
+            if error == vk::Result::ERROR_OUT_OF_DATE_KHR {
                 self.recreate_swapchain(size);
-            } else if error != vk::Result::SUCCESS && error != vk::Result::SUBOPTIMAL_KHR {
-                panic!("failed to acquire swap chain image!");
+                return;
             }
+
+            panic!("failed to acquire swap chain image!");
+        } else if result.unwrap() {
+            self.recreate_swapchain(size);
         }
 
         self.frames.step();
@@ -1165,6 +1181,10 @@ impl Drop for Renderer {
             self.uniform_buffers[i].destroy(&self.context);
         }
 
+        unsafe {
+            self.context.device.destroy_sampler(self.sampler, None);
+        }
+
         DescriptorPool::destroy_descriptor_pool(&self.context, self.descriptor_pool);
         DescriptorSetLayout::destroy_descriptor_set_layout(
             &self.context,
@@ -1222,8 +1242,7 @@ impl winit::application::ApplicationHandler for App {
                 self.window_resized = true;
             }
             winit::event::WindowEvent::RedrawRequested => {
-                let r = self
-                    .renderer
+                self.renderer
                     .as_mut()
                     .unwrap()
                     .draw_frame(self.window.as_ref().unwrap(), self.window_resized);
