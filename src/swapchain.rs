@@ -1,6 +1,6 @@
 use std::ptr;
 
-use super::vulkan_context::VulkanContext;
+use super::vulkan_context::{SwapChainSupportDetails, VulkanContext};
 use ash::vk;
 
 use super::framebuffer::Framebuffer;
@@ -12,9 +12,10 @@ pub struct Swapchain {
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
-    pub extent: vk::Extent2D,
+
     pub format: vk::SurfaceFormatKHR,
     pub present_mode: vk::PresentModeKHR,
+    pub extent: vk::Extent2D,
 
     pub depth_image: vk::Image,
     pub depth_image_memory: vk::DeviceMemory,
@@ -36,6 +37,7 @@ impl Swapchain {
         present_mode: vk::PresentModeKHR,
         extent: vk::Extent2D,
         depth_format: vk::Format,
+        swapchain_details: &SwapChainSupportDetails,
         sharing_mode: vk::SharingMode,
         graphics_queue_index: u32,
         present_queue_index: u32,
@@ -49,6 +51,7 @@ impl Swapchain {
             format,
             present_mode,
             extent,
+            swapchain_details,
             sharing_mode,
             &queue_family_indices,
             vk::SwapchainKHR::null(),
@@ -72,9 +75,9 @@ impl Swapchain {
             swapchain,
             images,
             image_views,
-            extent,
             format,
             present_mode,
+            extent,
             depth_image,
             depth_image_memory,
             depth_image_view,
@@ -106,12 +109,17 @@ impl Swapchain {
         &mut self,
         context: &VulkanContext,
         surface: vk::SurfaceKHR,
+        format: vk::SurfaceFormatKHR,
+        present_mode: vk::PresentModeKHR,
         extent: vk::Extent2D,
+        swapchain_details: &SwapChainSupportDetails,
         render_pass: &RenderPass,
     ) {
-        let queue_family_indices: [u32; 2] = [self.graphics_queue_index, self.present_queue_index];
-
+        self.format = format;
+        self.present_mode = present_mode;
         self.extent = extent;
+
+        let queue_family_indices: [u32; 2] = [self.graphics_queue_index, self.present_queue_index];
 
         Self::destroy_swapchain(context, self.swapchain);
 
@@ -121,6 +129,7 @@ impl Swapchain {
             self.format,
             self.present_mode,
             self.extent,
+            swapchain_details,
             self.sharing_mode,
             &queue_family_indices,
             vk::SwapchainKHR::null(), // TODO: use
@@ -261,13 +270,14 @@ impl Swapchain {
         format: vk::SurfaceFormatKHR,
         present_mode: vk::PresentModeKHR,
         extent: vk::Extent2D,
+        swapchain_details: &SwapChainSupportDetails,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
         old_swapchain: vk::SwapchainKHR,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>) {
-        let mut image_count: u32 = context.swapchain_details.capabilities.min_image_count + 1;
-        if image_count > context.swapchain_details.capabilities.max_image_count {
-            image_count = context.swapchain_details.capabilities.min_image_count;
+        let mut image_count: u32 = swapchain_details.capabilities.min_image_count + 1;
+        if image_count > swapchain_details.capabilities.max_image_count {
+            image_count = swapchain_details.capabilities.min_image_count;
         }
 
         let create_info = vk::SwapchainCreateInfoKHR {
@@ -281,7 +291,7 @@ impl Swapchain {
             image_extent: extent,
             image_array_layers: 1,
             image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            pre_transform: context.swapchain_details.capabilities.current_transform,
+            pre_transform: swapchain_details.capabilities.current_transform,
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
             present_mode: present_mode,
             clipped: vk::TRUE,

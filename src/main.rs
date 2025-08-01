@@ -93,6 +93,8 @@ struct Renderer {
 
     graphics_queue: Queue,
     present_queue: Queue,
+    transfer_queue: Queue,
+    compute_queue: Queue,
 
     swapchain: Swapchain,
 
@@ -135,6 +137,7 @@ impl Renderer {
 
         let base = !queue_family_indices.graphics.is_empty()
             && !queue_family_indices.present.is_empty()
+            && !queue_family_indices.compute.is_empty()
             && is_swapchain_adequate
             && features.sampler_anisotropy == vk::TRUE;
 
@@ -142,7 +145,9 @@ impl Renderer {
             return 0;
         }
 
-        return 1 + !queue_family_indices.transfer_only.is_empty() as u32;
+        return 1
+            + !queue_family_indices.transfer_only.is_empty() as u32
+            + !queue_family_indices.compute_only.is_empty() as u32;
     }
 
     fn choose_swap_surface_format(available: &Vec<vk::SurfaceFormatKHR>) -> vk::SurfaceFormatKHR {
@@ -293,16 +298,37 @@ impl Renderer {
             graphics_queue
         };
 
-        let swapchain_format = Self::choose_swap_surface_format(&context.swapchain_details.formats);
+        let compute_queue = if !context.queue_family_indices.compute_only.is_empty() {
+            Queue::new(
+                &context,
+                *context
+                    .queue_family_indices
+                    .transfer_only
+                    .iter()
+                    .next()
+                    .unwrap(),
+                0,
+            )
+        } else {
+            Queue::new(
+                &context,
+                *context.queue_family_indices.compute.iter().next().unwrap(),
+                0,
+            )
+        };
+
+        let swapchain_details = VulkanContext::query_swapchain_support(
+            &surface_loader,
+            surface,
+            context.physical_device,
+        );
+        let swapchain_format = Self::choose_swap_surface_format(&swapchain_details.formats);
         let swapchain_present_mode: vk::PresentModeKHR =
-            Self::choose_swap_present_mode(&context.swapchain_details.present_modes);
+            Self::choose_swap_present_mode(&swapchain_details.present_modes);
 
         let size: winit::dpi::PhysicalSize<u32> = window.inner_size();
-        let swapchain_extent = Self::choose_swap_extent(
-            size.width,
-            size.height,
-            &context.swapchain_details.capabilities,
-        );
+        let swapchain_extent =
+            Self::choose_swap_extent(size.width, size.height, &swapchain_details.capabilities);
 
         let depth_format = Self::find_depth_format(&context);
 
@@ -452,13 +478,14 @@ impl Renderer {
 
         let render_pass = Self::create_render_pass(&context, swapchain_format.format, depth_format);
 
-        let mut swapchain = Swapchain::new(
+        let swapchain = Swapchain::new(
             &context,
             surface,
             swapchain_format,
             swapchain_present_mode,
             swapchain_extent,
             depth_format,
+            &swapchain_details,
             if graphics_queue.family_index == present_queue.family_index {
                 vk::SharingMode::EXCLUSIVE
             } else {
@@ -522,6 +549,8 @@ impl Renderer {
             surface,
             graphics_queue,
             present_queue,
+            transfer_queue,
+            compute_queue,
             swapchain,
             descriptor_set_layout,
             descriptor_pool,
@@ -580,13 +609,33 @@ impl Renderer {
     fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         self.context.wait_idle();
 
+        let swapchain_details = VulkanContext::query_swapchain_support(
+            &self.surface_loader,
+            self.surface,
+            self.context.physical_device,
+        );
+        let swapchain_format = Self::choose_swap_surface_format(&swapchain_details.formats);
+        let swapchain_present_mode: vk::PresentModeKHR =
+            Self::choose_swap_present_mode(&swapchain_details.present_modes);
+        let swapchain_extent =
+            Self::choose_swap_extent(size.width, size.height, &swapchain_details.capabilities);
+
+        if swapchain_format != self.swapchain.format {
+            self.render_pass.destroy(&self.context);
+            self.render_pass = Self::create_render_pass(
+                &self.context,
+                swapchain_format.format,
+                self.swapchain.depth_format,
+            )
+        }
+
         self.swapchain.recreate(
             &self.context,
             self.surface,
-            vk::Extent2D {
-                width: size.width,
-                height: size.height,
-            },
+            swapchain_format,
+            swapchain_present_mode,
+            swapchain_extent,
+            &swapchain_details,
             &self.render_pass,
         );
     }
@@ -651,7 +700,7 @@ impl Renderer {
             )
         };
 
-        let mut image_index: u32 = u32::MAX;
+        let image_index: u32;
 
         match result {
             Ok(value) => {
@@ -1238,8 +1287,10 @@ impl winit::application::ApplicationHandler for App {
             winit::event::WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            winit::event::WindowEvent::Resized(_size) => {
-                self.window_resized = true;
+            winit::event::WindowEvent::Resized(size) => {
+                if size.width != 0 && size.height != 0 {
+                    self.window_resized = true;
+                }
             }
             winit::event::WindowEvent::RedrawRequested => {
                 self.renderer

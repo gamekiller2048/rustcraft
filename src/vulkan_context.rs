@@ -11,6 +11,7 @@ pub struct QueueFamilyIndices {
     pub transfer: HashSet<u32>,
     pub transfer_only: HashSet<u32>,
     pub compute: HashSet<u32>,
+    pub compute_only: HashSet<u32>,
 }
 
 #[derive(Default, Debug)]
@@ -25,7 +26,6 @@ pub struct VulkanContext {
 
     pub physical_device: vk::PhysicalDevice,
     pub queue_family_indices: QueueFamilyIndices,
-    pub swapchain_details: SwapChainSupportDetails,
 
     pub device: ash::Device,
     pub swapchain_loader: khr::swapchain::Device,
@@ -47,7 +47,7 @@ impl VulkanContext {
         required_device_extensions: &[*const c_char],
         score_physical_device_fn: ScorePhysicalDeviceFn,
     ) -> Self {
-        let (physical_device, queue_family_indices, swapchain_details) = Self::pick_physical_device(
+        let (physical_device, queue_family_indices) = Self::pick_physical_device(
             &instance,
             &surface_loader,
             surface,
@@ -66,13 +66,12 @@ impl VulkanContext {
             instance,
             physical_device,
             queue_family_indices,
-            swapchain_details,
             device,
             swapchain_loader,
         }
     }
 
-    fn query_swapchain_support(
+    pub fn query_swapchain_support(
         surface_loader: &khr::surface::Instance,
         surface: vk::SurfaceKHR,
         device: vk::PhysicalDevice,
@@ -134,6 +133,7 @@ impl VulkanContext {
         let mut transfer: HashSet<u32> = HashSet::new();
         let mut transfer_only: HashSet<u32> = HashSet::new();
         let mut compute: HashSet<u32> = HashSet::new();
+        let mut compute_only: HashSet<u32> = HashSet::new();
 
         let mut index: u32 = 0;
 
@@ -147,6 +147,9 @@ impl VulkanContext {
             }
             if family.queue_flags.contains(vk::QueueFlags::COMPUTE) {
                 compute.insert(index);
+                if family.queue_flags & vk::QueueFlags::COMPUTE == vk::QueueFlags::empty() {
+                    compute_only.insert(index);
+                }
             }
 
             if family.queue_flags.contains(vk::QueueFlags::TRANSFER) {
@@ -175,6 +178,7 @@ impl VulkanContext {
             transfer,
             transfer_only,
             compute,
+            compute_only,
         }
     }
 
@@ -184,11 +188,7 @@ impl VulkanContext {
         surface: vk::SurfaceKHR,
         required_device_extensions: &[*const c_char],
         score_physical_device_fn: ScorePhysicalDeviceFn,
-    ) -> (
-        vk::PhysicalDevice,
-        QueueFamilyIndices,
-        SwapChainSupportDetails,
-    ) {
+    ) -> (vk::PhysicalDevice, QueueFamilyIndices) {
         let devices: Vec<vk::PhysicalDevice> =
             unsafe { instance.enumerate_physical_devices().unwrap() };
 
@@ -197,11 +197,7 @@ impl VulkanContext {
         }
 
         let mut max_score: u32 = 0;
-        let mut best = (
-            vk::PhysicalDevice::null(),
-            QueueFamilyIndices::default(),
-            SwapChainSupportDetails::default(),
-        );
+        let mut best = (vk::PhysicalDevice::null(), QueueFamilyIndices::default());
 
         for device in devices {
             let queue_family_indices: QueueFamilyIndices =
@@ -225,7 +221,7 @@ impl VulkanContext {
 
             if score > max_score {
                 max_score = score;
-                best = (device, queue_family_indices, swapchain_details);
+                best = (device, queue_family_indices);
             }
         }
 

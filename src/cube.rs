@@ -152,6 +152,7 @@ pub const INDICES: [u16; 36] = [
     20, 21, 22, 22, 23, 20,
 ];
 
+
 // if graphics_queue.family_index != transfer_queue.family_index {
 //     let vertex_buffer_memory_barrier = vk::BufferMemoryBarrier {
 //         s_type: vk::StructureType::BUFFER_MEMORY_BARRIER,
