@@ -1,12 +1,17 @@
 use ash::vk;
-use std::ptr;
+use std::{cell::RefCell, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct ShaderModule {}
 
 impl ShaderModule {
-    pub fn create_shader_module(context: &VulkanContext, bytes: &Vec<u8>) -> vk::ShaderModule {
+    pub fn create_shader_module(
+        context: &VulkanContext,
+        bytes: &Vec<u8>,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) -> vk::ShaderModule {
         let create_info = vk::ShaderModuleCreateInfo {
             s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
             p_next: ptr::null(),
@@ -19,14 +24,24 @@ impl ShaderModule {
         unsafe {
             context
                 .device
-                .create_shader_module(&create_info, None)
+                .create_shader_module(
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         }
     }
 
-    pub fn destroy_shader_module(context: &VulkanContext, shader: vk::ShaderModule) {
+    pub fn destroy_shader_module(
+        context: &VulkanContext,
+        shader: vk::ShaderModule,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) {
         unsafe {
-            context.device.destroy_shader_module(shader, None);
+            context.device.destroy_shader_module(
+                shader,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 }

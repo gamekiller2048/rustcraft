@@ -1,6 +1,6 @@
 use ash::vk;
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_context::VulkanContext;
 
 #[derive(Clone, Copy)]
 pub struct Queue {

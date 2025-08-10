@@ -1,7 +1,8 @@
 use ash::vk;
-use std::ptr;
+use std::{cell::RefCell, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct Framebuffer;
 
@@ -12,6 +13,7 @@ impl Framebuffer {
         attachments: &[vk::ImageView],
         extent: vk::Extent2D,
         layers: u32,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> vk::Framebuffer {
         let create_info = vk::FramebufferCreateInfo {
             s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
@@ -29,14 +31,20 @@ impl Framebuffer {
         unsafe {
             context
                 .device
-                .create_framebuffer(&create_info, None)
+                .create_framebuffer(
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         }
     }
 
-    pub fn destroy_framebuffer(context: &VulkanContext, framebuffer: vk::Framebuffer) {
+    pub fn destroy_framebuffer(context: &VulkanContext, framebuffer: vk::Framebuffer, allocator: &Rc<RefCell<VulkanAllocator>>) {
         unsafe {
-            context.device.destroy_framebuffer(framebuffer, None);
+            context.device.destroy_framebuffer(
+                framebuffer,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 }

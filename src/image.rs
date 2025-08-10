@@ -1,8 +1,11 @@
 use ash::vk;
+use std::cell::RefCell;
 use std::ptr;
+use std::rc::Rc;
 
-use super::buffer::Buffer;
-use super::vulkan_context::VulkanContext;
+use crate::buffer::Buffer;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct Image {
     pub image: vk::Image,
@@ -23,6 +26,7 @@ impl Image {
         properties: vk::MemoryPropertyFlags,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> (vk::Image, vk::DeviceMemory) {
         let create_info = vk::ImageCreateInfo {
             s_type: vk::StructureType::IMAGE_CREATE_INFO,
@@ -47,7 +51,15 @@ impl Image {
             ..Default::default()
         };
 
-        let image: vk::Image = unsafe { context.device.create_image(&create_info, None).unwrap() };
+        let image: vk::Image = unsafe {
+            context
+                .device
+                .create_image(
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
+                .unwrap()
+        };
 
         let mem_requirements: vk::MemoryRequirements =
             unsafe { context.device.get_image_memory_requirements(image) };
@@ -64,7 +76,10 @@ impl Image {
         let image_memory: vk::DeviceMemory = unsafe {
             context
                 .device
-                .allocate_memory(&allocate_info, None)
+                .allocate_memory(
+                    &allocate_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         };
 
@@ -78,9 +93,16 @@ impl Image {
         (image, image_memory)
     }
 
-    pub fn destroy_image(context: &VulkanContext, image: vk::Image) {
+    pub fn destroy_image(
+        context: &VulkanContext,
+        image: vk::Image,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) {
         unsafe {
-            context.device.destroy_image(image, None);
+            context.device.destroy_image(
+                image,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 
@@ -94,6 +116,7 @@ impl Image {
         transfer_command_buffer: vk::CommandBuffer,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> (Self, Buffer) {
         let buffer_size: vk::DeviceSize = (size_of::<u8>() * pixels.len()) as u64;
 
@@ -105,6 +128,7 @@ impl Image {
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::SharingMode::EXCLUSIVE,
                 &[],
+                allocator,
             );
 
         let data_ptr: *mut u8 = context.map_memory(staging_buffer_memory, 0, buffer_size);
@@ -126,6 +150,7 @@ impl Image {
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             sharing_mode,
             queue_family_indices,
+            allocator,
         );
 
         Self::transition_image_layout(
@@ -264,14 +289,21 @@ impl Image {
         }
     }
 
-    pub fn destory_image(context: &VulkanContext, image: vk::Image) {
+    pub fn destory_image(
+        context: &VulkanContext,
+        image: vk::Image,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) {
         unsafe {
-            context.device.destroy_image(image, None);
+            context.device.destroy_image(
+                image,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext) {
-        Self::destory_image(context, self.image);
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+        Self::destory_image(context, self.image, allocator);
         context.free_memory(self.memory);
     }
 }

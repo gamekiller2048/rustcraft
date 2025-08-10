@@ -1,7 +1,8 @@
 use ash::vk;
-use std::ptr;
+use std::{cell::RefCell, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct Frame {
     pub swap_image_available_semaphore: vk::Semaphore,
@@ -15,7 +16,11 @@ pub struct FramesInFlight {
 }
 
 impl FramesInFlight {
-    pub fn new(context: &VulkanContext, max_frames: usize) -> Self {
+    pub fn new(
+        context: &VulkanContext,
+        max_frames: usize,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) -> Self {
         let semaphore_create_info = vk::SemaphoreCreateInfo {
             s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
             p_next: ptr::null(),
@@ -36,19 +41,28 @@ impl FramesInFlight {
             let swap_image_available_semaphore = unsafe {
                 context
                     .device
-                    .create_semaphore(&semaphore_create_info, None)
+                    .create_semaphore(
+                        &semaphore_create_info,
+                        Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                    )
                     .unwrap()
             };
             let render_finished_semaphore = unsafe {
                 context
                     .device
-                    .create_semaphore(&semaphore_create_info, None)
+                    .create_semaphore(
+                        &semaphore_create_info,
+                        Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                    )
                     .unwrap()
             };
             let in_flight_fence = unsafe {
                 context
                     .device
-                    .create_fence(&fence_create_info, None)
+                    .create_fence(
+                        &fence_create_info,
+                        Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                    )
                     .unwrap()
             };
 

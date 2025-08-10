@@ -1,7 +1,7 @@
 use ash::vk;
 use nalgebra_glm as glm;
 
-use super::vertex::Vertex;
+use crate::vertex::Vertex;
 
 #[repr(C)]
 pub struct MyVertex {
@@ -151,7 +151,6 @@ pub const INDICES: [u16; 36] = [
     16, 17, 18, 18, 19, 16, // Bottom face
     20, 21, 22, 22, 23, 20,
 ];
-
 
 // if graphics_queue.family_index != transfer_queue.family_index {
 //     let vertex_buffer_memory_barrier = vk::BufferMemoryBarrier {

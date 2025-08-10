@@ -1,14 +1,15 @@
 use ash::vk;
-use std::{collections::HashMap, ptr};
+use std::{cell::RefCell, collections::HashMap, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
-
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 pub struct DescriptorSetLayout;
 
 impl DescriptorSetLayout {
     pub fn create_descriptor_set_layout(
         context: &VulkanContext,
         bindings: &[vk::DescriptorSetLayoutBinding],
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> vk::DescriptorSetLayout {
         let create_info = vk::DescriptorSetLayoutCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -22,7 +23,10 @@ impl DescriptorSetLayout {
         unsafe {
             context
                 .device
-                .create_descriptor_set_layout(&create_info, None)
+                .create_descriptor_set_layout(
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         }
     }
@@ -30,11 +34,13 @@ impl DescriptorSetLayout {
     pub fn destroy_descriptor_set_layout(
         context: &VulkanContext,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) {
         unsafe {
-            context
-                .device
-                .destroy_descriptor_set_layout(descriptor_set_layout, None)
+            context.device.destroy_descriptor_set_layout(
+                descriptor_set_layout,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            )
         };
     }
 }

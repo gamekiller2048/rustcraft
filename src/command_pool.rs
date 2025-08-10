@@ -1,7 +1,8 @@
 use ash::vk;
-use std::ptr;
+use std::{cell::RefCell, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct CommandPool {
     pub command_pool: vk::CommandPool,
@@ -14,8 +15,10 @@ impl CommandPool {
         flags: vk::CommandPoolCreateFlags,
         queue: vk::Queue,
         queue_family_index: u32,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> Self {
-        let command_pool = Self::create_command_pool(context, flags, queue, queue_family_index);
+        let command_pool =
+            Self::create_command_pool(context, flags, queue, queue_family_index, allocator);
 
         Self {
             command_pool,
@@ -35,8 +38,8 @@ impl CommandPool {
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext) {
-        Self::destroy_command_pool(context, self.command_pool);
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+        Self::destroy_command_pool(context, self.command_pool, allocator);
     }
 
     pub fn submit(
@@ -80,6 +83,7 @@ impl CommandPool {
         flags: vk::CommandPoolCreateFlags,
         queue: vk::Queue,
         queue_family_index: u32,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> vk::CommandPool {
         let create_info = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
@@ -92,16 +96,26 @@ impl CommandPool {
         let command_pool = unsafe {
             context
                 .device
-                .create_command_pool(&create_info, None)
+                .create_command_pool(
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         };
 
         command_pool
     }
 
-    pub fn destroy_command_pool(context: &VulkanContext, command_pool: vk::CommandPool) {
+    pub fn destroy_command_pool(
+        context: &VulkanContext,
+        command_pool: vk::CommandPool,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) {
         unsafe {
-            context.device.destroy_command_pool(command_pool, None);
+            context.device.destroy_command_pool(
+                command_pool,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 }

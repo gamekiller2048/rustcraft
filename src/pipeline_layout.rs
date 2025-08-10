@@ -1,7 +1,8 @@
 use ash::vk;
-use std::ptr;
+use std::{cell::RefCell, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct PipelineLayout {}
 
@@ -10,6 +11,7 @@ impl PipelineLayout {
         context: &VulkanContext,
         descriptor_set_layouts: &[vk::DescriptorSetLayout],
         push_constants: &[vk::PushConstantRange],
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> vk::PipelineLayout {
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
             s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
@@ -25,16 +27,24 @@ impl PipelineLayout {
         unsafe {
             context
                 .device
-                .create_pipeline_layout(&pipeline_layout_create_info, None)
+                .create_pipeline_layout(
+                    &pipeline_layout_create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         }
     }
 
-    pub fn destroy_pipeline_layout(context: &VulkanContext, pipeline_layout: vk::PipelineLayout) {
+    pub fn destroy_pipeline_layout(
+        context: &VulkanContext,
+        pipeline_layout: vk::PipelineLayout,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) {
         unsafe {
-            context
-                .device
-                .destroy_pipeline_layout(pipeline_layout, None);
+            context.device.destroy_pipeline_layout(
+                pipeline_layout,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 }

@@ -1,10 +1,14 @@
+#![feature(allocator_api)]
 #![allow(dead_code, unused_variables)]
 use ::image::{EncodableLayout, ImageReader};
 use ash::{khr, vk};
 use nalgebra_glm as glm;
 use std::{
+    cell::RefCell,
     ffi::{c_char, c_void},
-    fs, ptr, slice,
+    fs, ptr,
+    rc::Rc,
+    slice,
     time::{Duration, SystemTime},
     u32,
 };
@@ -51,8 +55,11 @@ use image::Image;
 mod pipeline_layout;
 use pipeline_layout::PipelineLayout;
 
-mod pipeline;
-use pipeline::Pipeline;
+mod graphics_pipeline;
+use graphics_pipeline::GraphicsPipeline;
+
+mod compute_pipeline;
+use compute_pipeline::ComputePipeline;
 
 mod image_view;
 use image_view::ImageView;
@@ -71,15 +78,28 @@ use frames_in_flight::FramesInFlight;
 mod cube;
 use cube::{INDICES, MyVertex, VERTICES};
 
+mod sampler;
+use sampler::Sampler;
+
+mod semaphore;
+use semaphore::Semaphore;
+
+mod fence;
+use fence::Fence;
+
+mod vulkan_allocator;
+use vulkan_allocator::VulkanAllocator;
+
 struct TransformationData {
     proj_view: glm::Mat4,
     model: glm::Mat4,
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 3;
+const MAX_FRAMES_IN_FLIGHT: usize = 1;
 
 struct Renderer {
     entry: ash::Entry,
+    vulkan_allocator: Rc<RefCell<VulkanAllocator>>,
     context: VulkanContext,
 
     #[cfg(feature = "validation")]
@@ -108,8 +128,8 @@ struct Renderer {
     render_pass: RenderPass,
 
     pipeline_layout: vk::PipelineLayout,
-    graphics_pipeline: vk::Pipeline,
-
+    graphics_pipeline: GraphicsPipeline,
+    // compute_pipeline: ComputePipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
 
@@ -119,7 +139,10 @@ struct Renderer {
     graphics_command_pool: CommandPool,
     draw_command_buffers: Vec<vk::CommandBuffer>,
 
+    shader_storage_buffers: Vec<Buffer>,
+
     transfer_command_pool: CommandPool,
+    compute_command_pool: CommandPool,
 
     frames: FramesInFlight,
     start_time: Duration,
@@ -261,6 +284,9 @@ impl Renderer {
         let surface_loader = khr::surface::Instance::new(&entry, &instance);
         let surface = Self::create_surface(&entry, &instance, window);
 
+        let vulkan_allocator = Rc::new(RefCell::new(VulkanAllocator::new()));
+        // let allocation_callbacks = vulkan_allocator.get_allocation_callbacks();
+
         const REQUIRED_DEVICE_EXTENSIONS: [*const c_char; 1] = [ash::khr::swapchain::NAME.as_ptr()];
         let context = VulkanContext::new(
             &entry,
@@ -269,6 +295,7 @@ impl Renderer {
             surface,
             &REQUIRED_DEVICE_EXTENSIONS,
             Self::score_physical_device,
+            &vulkan_allocator,
         );
 
         let graphics_queue = Queue::new(
@@ -337,6 +364,7 @@ impl Renderer {
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             graphics_queue.queue,
             graphics_queue.family_index,
+            &vulkan_allocator,
         );
 
         let initial_transfer_command_buffer = CommandBuffer::new(
@@ -354,6 +382,7 @@ impl Renderer {
             initial_transfer_command_buffer.command_buffer,
             vk::SharingMode::EXCLUSIVE,
             &[],
+            &vulkan_allocator,
         );
 
         let (index_buffer, index_staging_buffer) = Buffer::create_index_buffer(
@@ -362,6 +391,7 @@ impl Renderer {
             initial_transfer_command_buffer.command_buffer,
             vk::SharingMode::EXCLUSIVE,
             &[],
+            &vulkan_allocator,
         );
 
         let image = ImageReader::open("image2.png")
@@ -381,6 +411,7 @@ impl Renderer {
             initial_transfer_command_buffer.command_buffer,
             vk::SharingMode::EXCLUSIVE,
             &[],
+            &vulkan_allocator,
         );
         let texture_image_view = ImageView::new(
             &context,
@@ -394,6 +425,7 @@ impl Renderer {
                 base_array_layer: 0,
                 layer_count: 1,
             },
+            &vulkan_allocator,
         );
 
         initial_transfer_command_buffer.end(&context);
@@ -411,9 +443,9 @@ impl Renderer {
             slice::from_ref(&initial_transfer_command_buffer.command_buffer),
         );
 
-        vertex_staging_buffer.destroy(&context);
-        index_staging_buffer.destroy(&context);
-        texture_image_staging_buffer.destroy(&context);
+        vertex_staging_buffer.destroy(&context, &vulkan_allocator);
+        index_staging_buffer.destroy(&context, &vulkan_allocator);
+        texture_image_staging_buffer.destroy(&context, &vulkan_allocator);
 
         let uniform_buffer_binding: u32 = 0;
         let uniform_sampler_binding: u32 = 1;
@@ -424,12 +456,17 @@ impl Renderer {
         let descriptor_set_layout = DescriptorSetLayout::create_descriptor_set_layout(
             &context,
             &descriptor_set_layout_builder.bindings,
+            &vulkan_allocator,
         );
 
         let max_sets = MAX_FRAMES_IN_FLIGHT as u32;
         let pool_sizes = descriptor_set_layout_builder.calculate_pool_sizes(max_sets);
-        let descriptor_pool =
-            DescriptorPool::create_descriptor_pool(&context, &pool_sizes, max_sets);
+        let descriptor_pool = DescriptorPool::create_descriptor_pool(
+            &context,
+            &pool_sizes,
+            max_sets,
+            &vulkan_allocator,
+        );
 
         let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> =
             vec![descriptor_set_layout; max_sets as usize];
@@ -439,8 +476,8 @@ impl Renderer {
             &descriptor_set_layouts,
         );
 
-        let uniform_buffers = Self::create_uniform_buffers(&context);
-        let sampler = Self::create_texture_sampler(&context);
+        let uniform_buffers = Self::create_uniform_buffers(&context, &vulkan_allocator);
+        let sampler = Self::create_texture_sampler(&context, &vulkan_allocator);
 
         for i in 0..max_sets as usize {
             let buffer_info = vk::DescriptorBufferInfo {
@@ -476,7 +513,12 @@ impl Renderer {
             DescriptorPool::write_descriptors(&context, &descriptor_writes, &[]);
         }
 
-        let render_pass = Self::create_render_pass(&context, swapchain_format.format, depth_format);
+        let render_pass = Self::create_render_pass(
+            &context,
+            swapchain_format.format,
+            depth_format,
+            &vulkan_allocator,
+        );
 
         let swapchain = Swapchain::new(
             &context,
@@ -494,30 +536,38 @@ impl Renderer {
             graphics_queue.family_index,
             present_queue.family_index,
             &render_pass,
+            &vulkan_allocator,
         );
 
-        let vertex_shader =
-            ShaderModule::create_shader_module(&context, &fs::read("res/shader.vert.spv").unwrap());
-        let fragment_shader =
-            ShaderModule::create_shader_module(&context, &fs::read("res/shader.frag.spv").unwrap());
+        let vertex_shader = ShaderModule::create_shader_module(
+            &context,
+            &fs::read("res/shader.vert.spv").unwrap(),
+            &vulkan_allocator,
+        );
+        let fragment_shader = ShaderModule::create_shader_module(
+            &context,
+            &fs::read("res/shader.frag.spv").unwrap(),
+            &vulkan_allocator,
+        );
 
         let pipeline_layout = PipelineLayout::create_pipeline_layout(
             &context,
             slice::from_ref(&descriptor_set_layout),
             &[],
+            &vulkan_allocator,
         );
 
-        let graphics_pipeline = Self::create_graphics_pipeline(
+        let graphics_pipeline = GraphicsPipeline::new(
             &context,
             pipeline_layout,
             vertex_shader,
             fragment_shader,
             swapchain_extent,
             render_pass.render_pass,
+            0,
+            MyVertex::get_binding_description(),
+            &MyVertex::get_attribute_description(),
         );
-
-        ShaderModule::destroy_shader_module(&context, vertex_shader);
-        ShaderModule::destroy_shader_module(&context, fragment_shader);
 
         let draw_command_buffers = CommandBuffer::create_command_buffers(
             &context,
@@ -531,12 +581,30 @@ impl Renderer {
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             transfer_queue.queue,
             transfer_queue.family_index,
+            &vulkan_allocator,
         );
 
-        let frames = FramesInFlight::new(&context, MAX_FRAMES_IN_FLIGHT);
+        let shader_storage_buffers = vec![]; //Self::create_shader_storage_buffers(&context);
+        let compute_shader = ShaderModule::create_shader_module(
+            &context,
+            &fs::read("res/shader.comp.spv").unwrap(),
+            &vulkan_allocator,
+        );
+        // let compute_pipeline: ComputePipeline = ComputePipeline::new();
+
+        let compute_command_pool = CommandPool::new(
+            &context,
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            compute_queue.queue,
+            compute_queue.family_index,
+            &vulkan_allocator,
+        );
+
+        let frames = FramesInFlight::new(&context, MAX_FRAMES_IN_FLIGHT, &vulkan_allocator);
 
         Self {
             entry,
+            vulkan_allocator,
             context,
 
             #[cfg(feature = "validation")]
@@ -567,6 +635,8 @@ impl Renderer {
             texture_image,
             texture_image_view,
             transfer_command_pool,
+            compute_command_pool,
+            shader_storage_buffers,
             frames,
             start_time: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -574,7 +644,10 @@ impl Renderer {
         }
     }
 
-    fn create_texture_sampler(context: &VulkanContext) -> vk::Sampler {
+    fn create_texture_sampler(
+        context: &VulkanContext,
+        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) -> vk::Sampler {
         let properties: vk::PhysicalDeviceProperties = unsafe {
             context
                 .instance
@@ -603,7 +676,15 @@ impl Renderer {
             ..Default::default()
         };
 
-        unsafe { context.device.create_sampler(&create_info, None).unwrap() }
+        unsafe {
+            context
+                .device
+                .create_sampler(
+                    &create_info,
+                    Some(&vulkan_allocator.borrow_mut().get_allocation_callbacks()),
+                )
+                .unwrap()
+        }
     }
 
     fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -621,12 +702,27 @@ impl Renderer {
             Self::choose_swap_extent(size.width, size.height, &swapchain_details.capabilities);
 
         if swapchain_format != self.swapchain.format {
-            self.render_pass.destroy(&self.context);
+            self.render_pass
+                .destroy(&self.context, &self.vulkan_allocator);
             self.render_pass = Self::create_render_pass(
                 &self.context,
                 swapchain_format.format,
                 self.swapchain.depth_format,
-            )
+                &self.vulkan_allocator,
+            );
+
+            GraphicsPipeline::destroy_pipeline(&self.context, self.graphics_pipeline.pipeline);
+            self.graphics_pipeline = GraphicsPipeline::new(
+                &self.context,
+                self.pipeline_layout,
+                self.graphics_pipeline.vertex_shader,
+                self.graphics_pipeline.fragment_shader,
+                swapchain_extent,
+                self.render_pass.render_pass,
+                0,
+                MyVertex::get_binding_description(),
+                &MyVertex::get_attribute_description(),
+            );
         }
 
         self.swapchain.recreate(
@@ -637,6 +733,7 @@ impl Renderer {
             swapchain_extent,
             &swapchain_details,
             &self.render_pass,
+            &self.vulkan_allocator,
         );
     }
 
@@ -678,6 +775,13 @@ impl Renderer {
     }
 
     fn draw_frame(&mut self, window: &winit::window::Window, window_resized: bool) {
+        let size = window.inner_size();
+
+        if window_resized {
+            self.recreate_swapchain(size);
+            return;
+        }
+
         unsafe {
             self.context
                 .device
@@ -688,8 +792,6 @@ impl Renderer {
                 )
                 .unwrap();
         }
-
-        let size = window.inner_size();
 
         let result = unsafe {
             self.context.swapchain_loader.acquire_next_image(
@@ -702,11 +804,14 @@ impl Renderer {
 
         let image_index: u32;
 
+        // NOTE: if suboptimal finish this frame's submission so calling waitIdle will wait for image_available_semaphore to finish and recreate swapchain.
+        // TODO: it might be better to just submit an empty command buffer waiting on image_available_semaphore so I don't need to finish the frame.
+        let mut acquire_suboptimal = false;
+
         match result {
             Ok(value) => {
-                if window_resized || value.1 {
-                    self.recreate_swapchain(size);
-                    return;
+                if value.1 {
+                    acquire_suboptimal = true;
                 }
 
                 image_index = value.0;
@@ -730,7 +835,7 @@ impl Renderer {
                 .unwrap();
         }
 
-        self.record(image_index);
+        self.record_commands(image_index);
         self.update_uniform_buffers();
 
         let wait_stages: [vk::PipelineStageFlags; 1] =
@@ -763,23 +868,20 @@ impl Renderer {
                 .queue_present(self.present_queue.queue, &present_info)
         };
 
-        if result.is_err() {
-            let error: vk::Result = result.unwrap_err();
-
-            if error == vk::Result::ERROR_OUT_OF_DATE_KHR {
-                self.recreate_swapchain(size);
-                return;
-            }
-
-            panic!("failed to acquire swap chain image!");
-        } else if result.unwrap() {
+        if result.is_err() && result.unwrap_err() == vk::Result::ERROR_OUT_OF_DATE_KHR
+            || acquire_suboptimal
+            || result.is_ok() && result.unwrap()
+        {
             self.recreate_swapchain(size);
+            return;
+        } else if result.is_err() {
+            panic!("failed to acquire swap chain image!");
         }
 
         self.frames.step();
     }
 
-    fn record(&self, swap_image_index: u32) {
+    fn record_commands(&self, swap_image_index: u32) {
         let cmd = CommandBuffer {
             command_buffer: self.draw_command_buffers[self.frames.curr_frame],
         };
@@ -818,7 +920,7 @@ impl Renderer {
         cmd.bind_pipeline(
             &self.context,
             vk::PipelineBindPoint::GRAPHICS,
-            self.graphics_pipeline,
+            self.graphics_pipeline.pipeline,
         );
 
         cmd.bind_vertex_buffers(
@@ -881,6 +983,7 @@ impl Renderer {
         context: &VulkanContext,
         swapchain_format: vk::Format,
         depth_image_format: vk::Format,
+        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> RenderPass {
         let color_attachment = vk::AttachmentDescription {
             format: swapchain_format,
@@ -956,235 +1059,14 @@ impl Renderer {
             slice::from_ref(&dependency),
             color_attachment_ref.attachment,
             depth_attachment_ref.attachment,
+            vulkan_allocator,
         )
     }
 
-    fn create_graphics_pipeline(
+    fn create_uniform_buffers(
         context: &VulkanContext,
-        pipeline_layout: vk::PipelineLayout,
-        vertex_shader: vk::ShaderModule,
-        fragment_shader: vk::ShaderModule,
-        swapchain_extent: vk::Extent2D,
-        render_pass: vk::RenderPass,
-    ) -> vk::Pipeline {
-        let vert_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
-            s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
-            p_name: c"main".as_ptr(),
-            p_next: ptr::null(),
-            flags: vk::PipelineShaderStageCreateFlags::empty(),
-            stage: vk::ShaderStageFlags::VERTEX,
-            module: vertex_shader,
-            p_specialization_info: ptr::null(), // for constexpr's in shader
-            ..Default::default()
-        };
-
-        let frag_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
-            s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
-            p_name: c"main".as_ptr(),
-            p_next: ptr::null(),
-            flags: vk::PipelineShaderStageCreateFlags::empty(),
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            module: fragment_shader,
-            p_specialization_info: ptr::null(), // for constexpr's in shader
-            ..Default::default()
-        };
-
-        let shader_stage_create_infos: [vk::PipelineShaderStageCreateInfo; 2] =
-            [vert_shader_stage_create_info, frag_shader_stage_create_info];
-
-        let vertex_binding_description: vk::VertexInputBindingDescription =
-            MyVertex::get_binding_description();
-        let vertex_attribute_description: Vec<vk::VertexInputAttributeDescription> =
-            MyVertex::get_attribute_description();
-
-        let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineVertexInputStateCreateFlags::empty(),
-            vertex_attribute_description_count: vertex_attribute_description.len() as u32,
-            p_vertex_attribute_descriptions: vertex_attribute_description.as_ptr(),
-            vertex_binding_description_count: 1,
-            p_vertex_binding_descriptions: &vertex_binding_description,
-            ..Default::default()
-        };
-
-        let input_assembly_state_create_info = vk::PipelineInputAssemblyStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-            flags: vk::PipelineInputAssemblyStateCreateFlags::empty(),
-            p_next: ptr::null(),
-            primitive_restart_enable: vk::FALSE,
-            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-            ..Default::default()
-        };
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain_extent.width as f32,
-            height: swapchain_extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain_extent,
-        };
-
-        let viewport_state_create_info = vk::PipelineViewportStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineViewportStateCreateFlags::empty(),
-            scissor_count: 1,
-            p_scissors: &scissor,
-            viewport_count: 1,
-            p_viewports: &viewport,
-            ..Default::default()
-        };
-
-        let rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineRasterizationStateCreateFlags::empty(),
-            depth_clamp_enable: vk::FALSE,
-            cull_mode: vk::CullModeFlags::NONE,
-            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
-            line_width: 1.0,
-            polygon_mode: vk::PolygonMode::FILL,
-            rasterizer_discard_enable: vk::FALSE,
-            depth_bias_clamp: 0.0,
-            depth_bias_constant_factor: 0.0,
-            depth_bias_enable: vk::FALSE,
-            depth_bias_slope_factor: 0.0,
-            ..Default::default()
-        };
-
-        // no multisampling for now
-        let multisample_state_create_info = vk::PipelineMultisampleStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-            flags: vk::PipelineMultisampleStateCreateFlags::empty(),
-            p_next: ptr::null(),
-            rasterization_samples: vk::SampleCountFlags::TYPE_1,
-            sample_shading_enable: vk::FALSE,
-            min_sample_shading: 0.0,
-            p_sample_mask: ptr::null(),
-            alpha_to_one_enable: vk::FALSE,
-            alpha_to_coverage_enable: vk::FALSE,
-            ..Default::default()
-        };
-
-        let stencil_state = vk::StencilOpState {
-            fail_op: vk::StencilOp::KEEP,
-            pass_op: vk::StencilOp::KEEP,
-            depth_fail_op: vk::StencilOp::KEEP,
-            compare_op: vk::CompareOp::ALWAYS,
-            compare_mask: 0,
-            write_mask: 0,
-            reference: 0,
-        };
-
-        let depth_stencil_state_create_info = vk::PipelineDepthStencilStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineDepthStencilStateCreateFlags::empty(),
-            depth_test_enable: vk::TRUE,
-            depth_write_enable: vk::TRUE,
-            depth_compare_op: vk::CompareOp::LESS,
-            depth_bounds_test_enable: vk::FALSE,
-            stencil_test_enable: vk::FALSE,
-            front: stencil_state,
-            back: stencil_state,
-            max_depth_bounds: 1.0,
-            min_depth_bounds: 0.0,
-            ..Default::default()
-        };
-
-        let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState {
-            blend_enable: vk::FALSE,
-            color_write_mask: vk::ColorComponentFlags::R
-                | vk::ColorComponentFlags::G
-                | vk::ColorComponentFlags::B
-                | vk::ColorComponentFlags::A,
-            src_color_blend_factor: vk::BlendFactor::ONE,
-            dst_color_blend_factor: vk::BlendFactor::ZERO,
-            color_blend_op: vk::BlendOp::ADD,
-            src_alpha_blend_factor: vk::BlendFactor::ONE,
-            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
-            alpha_blend_op: vk::BlendOp::ADD,
-        }];
-
-        let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineColorBlendStateCreateFlags::empty(),
-            logic_op_enable: vk::FALSE,
-            logic_op: vk::LogicOp::COPY,
-            attachment_count: color_blend_attachment_states.len() as u32,
-            p_attachments: color_blend_attachment_states.as_ptr(),
-            blend_constants: [0.0, 0.0, 0.0, 0.0],
-            ..Default::default()
-        };
-
-        let dynamic_states: [vk::DynamicState; 2] =
-            [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-
-        let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineDynamicStateCreateFlags::empty(),
-            dynamic_state_count: dynamic_states.len() as u32,
-            p_dynamic_states: dynamic_states.as_ptr(),
-            ..Default::default()
-        };
-
-        let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
-            s_type: vk::StructureType::GRAPHICS_PIPELINE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineCreateFlags::empty(),
-            stage_count: shader_stage_create_infos.len() as u32,
-            p_stages: shader_stage_create_infos.as_ptr(),
-            p_vertex_input_state: &vertex_input_state_create_info
-                as *const vk::PipelineVertexInputStateCreateInfo,
-            p_input_assembly_state: &input_assembly_state_create_info
-                as *const vk::PipelineInputAssemblyStateCreateInfo,
-            p_tessellation_state: ptr::null(),
-            p_viewport_state: &viewport_state_create_info
-                as *const vk::PipelineViewportStateCreateInfo,
-            p_rasterization_state: &rasterization_state_create_info
-                as *const vk::PipelineRasterizationStateCreateInfo,
-            p_multisample_state: &multisample_state_create_info
-                as *const vk::PipelineMultisampleStateCreateInfo,
-            p_depth_stencil_state: &depth_stencil_state_create_info
-                as *const vk::PipelineDepthStencilStateCreateInfo,
-            p_color_blend_state: &color_blend_state_create_info
-                as *const vk::PipelineColorBlendStateCreateInfo,
-            p_dynamic_state: &dynamic_state_create_info
-                as *const vk::PipelineDynamicStateCreateInfo,
-            layout: pipeline_layout,
-            render_pass: render_pass,
-            subpass: 0, // index to graphics subpass
-            base_pipeline_handle: vk::Pipeline::null(),
-            base_pipeline_index: -1,
-            ..Default::default()
-        };
-
-        let graphics_pipeline_create_infos: [vk::GraphicsPipelineCreateInfo; 1] =
-            [graphics_pipeline_create_info];
-        let graphics_pipelines: Vec<vk::Pipeline> = unsafe {
-            context
-                .device
-                .create_graphics_pipelines(
-                    vk::PipelineCache::null(),
-                    graphics_pipeline_create_infos.as_slice(),
-                    None,
-                )
-                .unwrap()
-        };
-
-        graphics_pipelines[0]
-    }
-
-    fn create_uniform_buffers(context: &VulkanContext) -> Vec<Buffer> {
+        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) -> Vec<Buffer> {
         let buffer_size: vk::DeviceSize = size_of::<TransformationData>() as u64;
         let mut uniform_buffers: Vec<Buffer> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
@@ -1196,6 +1078,7 @@ impl Renderer {
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::SharingMode::EXCLUSIVE,
                 &[],
+                &vulkan_allocator,
             );
 
             uniform_buffers.push(Buffer {
@@ -1206,6 +1089,40 @@ impl Renderer {
         }
 
         uniform_buffers
+    }
+
+    fn create_shader_storage_buffers(
+        context: &VulkanContext,
+        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) -> Vec<Buffer> {
+        let buffer_size: vk::DeviceSize = size_of::<TransformationData>() as u64;
+        let mut ssbos: Vec<Buffer> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let (buffer_memory, buffer) = Buffer::create_buffer(
+                &context,
+                0,
+                vk::BufferUsageFlags::VERTEX_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                vk::SharingMode::EXCLUSIVE,
+                &[],
+                &vulkan_allocator,
+            );
+
+            ssbos.push(Buffer {
+                buffer,
+                memory: buffer_memory,
+                mapped_memory: ptr::null_mut(),
+            });
+        }
+
+        ssbos
+    }
+
+    fn generate_particles() {
+        // let particles: Vec<Particle> = Vec::with_capacity(100);
     }
 }
 
@@ -1220,40 +1137,67 @@ impl Drop for Renderer {
         self.context.wait_idle();
 
         for i in 0..MAX_FRAMES_IN_FLIGHT as usize {
-            self.context
-                .destroy_semaphore(self.frames.frames[i].render_finished_semaphore);
-            self.context
-                .destroy_semaphore(self.frames.frames[i].swap_image_available_semaphore);
-            self.context
-                .destroy_fence(self.frames.frames[i].in_flight_fence);
+            Semaphore::destroy_semaphore(
+                &self.context,
+                self.frames.frames[i].render_finished_semaphore,
+                &self.vulkan_allocator,
+            );
+            Semaphore::destroy_semaphore(
+                &self.context,
+                self.frames.frames[i].swap_image_available_semaphore,
+                &self.vulkan_allocator,
+            );
+            Fence::destroy_fence(
+                &self.context,
+                self.frames.frames[i].in_flight_fence,
+                &self.vulkan_allocator,
+            );
 
-            self.uniform_buffers[i].destroy(&self.context);
+            self.uniform_buffers[i].destroy(&self.context, &self.vulkan_allocator);
         }
 
-        unsafe {
-            self.context.device.destroy_sampler(self.sampler, None);
-        }
+        Sampler::destroy_sampler(&self.context, self.sampler, &self.vulkan_allocator);
 
-        DescriptorPool::destroy_descriptor_pool(&self.context, self.descriptor_pool);
+        DescriptorPool::destroy_descriptor_pool(
+            &self.context,
+            self.descriptor_pool,
+            &self.vulkan_allocator,
+        );
         DescriptorSetLayout::destroy_descriptor_set_layout(
             &self.context,
             self.descriptor_set_layout,
+            &self.vulkan_allocator,
         );
 
-        PipelineLayout::destroy_pipeline_layout(&self.context, self.pipeline_layout);
-        Pipeline::destroy_pipeline(&self.context, self.graphics_pipeline);
-        self.render_pass.destroy(&self.context);
+        PipelineLayout::destroy_pipeline_layout(
+            &self.context,
+            self.pipeline_layout,
+            &self.vulkan_allocator,
+        );
+        self.graphics_pipeline
+            .destroy(&self.context, &self.vulkan_allocator);
+        self.render_pass
+            .destroy(&self.context, &self.vulkan_allocator);
 
-        self.vertex_buffer.destroy(&self.context);
-        self.index_buffer.destroy(&self.context);
+        self.vertex_buffer
+            .destroy(&self.context, &self.vulkan_allocator);
+        self.index_buffer
+            .destroy(&self.context, &self.vulkan_allocator);
 
-        self.texture_image_view.destroy(&self.context);
-        self.texture_image.destroy(&self.context);
+        self.texture_image_view
+            .destroy(&self.context, &self.vulkan_allocator);
+        self.texture_image
+            .destroy(&self.context, &self.vulkan_allocator);
 
-        self.graphics_command_pool.destroy(&self.context);
-        self.transfer_command_pool.destroy(&self.context);
+        self.graphics_command_pool
+            .destroy(&self.context, &self.vulkan_allocator);
+        self.transfer_command_pool
+            .destroy(&self.context, &self.vulkan_allocator);
+        self.compute_command_pool
+            .destroy(&self.context, &self.vulkan_allocator);
 
-        self.swapchain.destroy(&self.context);
+        self.swapchain
+            .destroy(&self.context, &self.vulkan_allocator);
         unsafe { self.surface_loader.destroy_surface(self.surface, None) }
         self.context.destroy_device();
         self.context.destroy_instance();

@@ -1,7 +1,8 @@
 use ash::vk;
-use std::ptr;
+use std::{cell::RefCell, ptr, rc::Rc};
 
-use super::vulkan_context::VulkanContext;
+use crate::vulkan_allocator::VulkanAllocator;
+use crate::vulkan_context::VulkanContext;
 
 pub struct DescriptorPool;
 
@@ -10,6 +11,7 @@ impl DescriptorPool {
         context: &VulkanContext,
         pool_sizes: &[vk::DescriptorPoolSize],
         max_sets: u32,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> vk::DescriptorPool {
         let create_info = vk::DescriptorPoolCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
@@ -24,16 +26,24 @@ impl DescriptorPool {
         unsafe {
             context
                 .device
-                .create_descriptor_pool(&create_info, None)
+                .create_descriptor_pool(
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         }
     }
 
-    pub fn destroy_descriptor_pool(context: &VulkanContext, descriptor_pool: vk::DescriptorPool) {
+    pub fn destroy_descriptor_pool(
+        context: &VulkanContext,
+        descriptor_pool: vk::DescriptorPool,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
+    ) {
         unsafe {
-            context
-                .device
-                .destroy_descriptor_pool(descriptor_pool, None);
+            context.device.destroy_descriptor_pool(
+                descriptor_pool,
+                Some(&allocator.borrow_mut().get_allocation_callbacks()),
+            );
         }
     }
 

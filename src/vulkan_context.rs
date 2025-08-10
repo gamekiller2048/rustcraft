@@ -1,8 +1,12 @@
 use ash::{khr, vk};
 use log::debug;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{CStr, c_char};
+use std::rc::Rc;
 use std::{ptr, u64};
+
+use crate::vulkan_allocator::VulkanAllocator;
 
 #[derive(Default, Debug)]
 pub struct QueueFamilyIndices {
@@ -29,6 +33,7 @@ pub struct VulkanContext {
 
     pub device: ash::Device,
     pub swapchain_loader: khr::swapchain::Device,
+    pub allocator: Rc<RefCell<VulkanAllocator>>,
 }
 
 pub type ScorePhysicalDeviceFn = fn(
@@ -46,6 +51,7 @@ impl VulkanContext {
         surface: vk::SurfaceKHR,
         required_device_extensions: &[*const c_char],
         score_physical_device_fn: ScorePhysicalDeviceFn,
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> Self {
         let (physical_device, queue_family_indices) = Self::pick_physical_device(
             &instance,
@@ -59,6 +65,7 @@ impl VulkanContext {
             physical_device,
             &queue_family_indices,
             required_device_extensions,
+            allocator,
         );
         let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
 
@@ -68,6 +75,7 @@ impl VulkanContext {
             queue_family_indices,
             device,
             swapchain_loader,
+            allocator: allocator.clone(),
         }
     }
 
@@ -240,6 +248,7 @@ impl VulkanContext {
         physical_device: vk::PhysicalDevice,
         queue_family_indices: &QueueFamilyIndices,
         required_device_extensions: &[*const c_char],
+        allocator: &Rc<RefCell<VulkanAllocator>>,
     ) -> ash::Device {
         let mut unique_indices: HashSet<u32> = HashSet::new();
         unique_indices.extend(&queue_family_indices.graphics);
@@ -284,7 +293,11 @@ impl VulkanContext {
 
         unsafe {
             instance
-                .create_device(physical_device, &create_info, None)
+                .create_device(
+                    physical_device,
+                    &create_info,
+                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
+                )
                 .unwrap()
         }
     }
@@ -337,18 +350,6 @@ impl VulkanContext {
         }
     }
 
-    pub fn destroy_semaphore(&self, semaphore: vk::Semaphore) {
-        unsafe {
-            self.device.destroy_semaphore(semaphore, None);
-        }
-    }
-
-    pub fn destroy_fence(&self, fence: vk::Fence) {
-        unsafe {
-            self.device.destroy_fence(fence, None);
-        }
-    }
-
     pub fn find_supported_format(
         &self,
         candidates: &Vec<vk::Format>,
@@ -381,13 +382,17 @@ impl VulkanContext {
 
     pub fn destroy_device(&self) {
         unsafe {
-            self.device.destroy_device(None);
+            self.device.destroy_device(Some(
+                &self.allocator.borrow_mut().get_allocation_callbacks(),
+            ));
         }
     }
 
     pub fn destroy_instance(&self) {
         unsafe {
-            self.instance.destroy_instance(None);
+            self.instance.destroy_instance(Some(
+                &self.allocator.borrow_mut().get_allocation_callbacks(),
+            ));
         }
     }
 }
