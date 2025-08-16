@@ -1,15 +1,17 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
 
+#[derive(Clone)]
 pub struct Frame {
     pub swap_image_available_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
 }
 
+#[derive(Clone)]
 pub struct FramesInFlight {
     pub frames: Vec<Frame>,
     pub curr_frame: usize,
@@ -19,20 +21,20 @@ impl FramesInFlight {
     pub fn new(
         context: &VulkanContext,
         max_frames: usize,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let semaphore_create_info = vk::SemaphoreCreateInfo {
             s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::SemaphoreCreateFlags::empty(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let fence_create_info = vk::FenceCreateInfo {
             s_type: vk::StructureType::FENCE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::FenceCreateFlags::SIGNALED,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let mut frames: Vec<Frame> = Vec::with_capacity(max_frames);
@@ -41,28 +43,19 @@ impl FramesInFlight {
             let swap_image_available_semaphore = unsafe {
                 context
                     .device
-                    .create_semaphore(
-                        &semaphore_create_info,
-                        Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                    )
+                    .create_semaphore(&semaphore_create_info, Some(&allocator.callbacks))
                     .unwrap()
             };
             let render_finished_semaphore = unsafe {
                 context
                     .device
-                    .create_semaphore(
-                        &semaphore_create_info,
-                        Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                    )
+                    .create_semaphore(&semaphore_create_info, Some(&allocator.callbacks))
                     .unwrap()
             };
             let in_flight_fence = unsafe {
                 context
                     .device
-                    .create_fence(
-                        &fence_create_info,
-                        Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                    )
+                    .create_fence(&fence_create_info, Some(&allocator.callbacks))
                     .unwrap()
             };
 

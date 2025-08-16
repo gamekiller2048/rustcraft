@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -13,7 +13,7 @@ impl Framebuffer {
         attachments: &[vk::ImageView],
         extent: vk::Extent2D,
         layers: u32,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> vk::Framebuffer {
         let create_info = vk::FramebufferCreateInfo {
             s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
@@ -25,26 +25,26 @@ impl Framebuffer {
             width: extent.width,
             height: extent.height,
             layers: layers,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
             context
                 .device
-                .create_framebuffer(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_framebuffer(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         }
     }
 
-    pub fn destroy_framebuffer(context: &VulkanContext, framebuffer: vk::Framebuffer, allocator: &Rc<RefCell<VulkanAllocator>>) {
+    pub fn destroy_framebuffer(
+        context: &VulkanContext,
+        framebuffer: vk::Framebuffer,
+        allocator: &Arc<VulkanAllocator>,
+    ) {
         unsafe {
-            context.device.destroy_framebuffer(
-                framebuffer,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_framebuffer(framebuffer, Some(&allocator.callbacks));
         }
     }
 }

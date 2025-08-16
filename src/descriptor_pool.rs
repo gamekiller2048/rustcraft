@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -11,7 +11,7 @@ impl DescriptorPool {
         context: &VulkanContext,
         pool_sizes: &[vk::DescriptorPoolSize],
         max_sets: u32,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> vk::DescriptorPool {
         let create_info = vk::DescriptorPoolCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
@@ -20,16 +20,13 @@ impl DescriptorPool {
             pool_size_count: pool_sizes.len() as u32,
             p_pool_sizes: pool_sizes.as_ptr(),
             max_sets: max_sets,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
             context
                 .device
-                .create_descriptor_pool(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_descriptor_pool(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         }
     }
@@ -37,13 +34,12 @@ impl DescriptorPool {
     pub fn destroy_descriptor_pool(
         context: &VulkanContext,
         descriptor_pool: vk::DescriptorPool,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_descriptor_pool(
-                descriptor_pool,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_descriptor_pool(descriptor_pool, Some(&allocator.callbacks));
         }
     }
 
@@ -58,7 +54,7 @@ impl DescriptorPool {
             descriptor_pool: descriptor_pool,
             descriptor_set_count: layouts.len() as u32,
             p_set_layouts: layouts.as_ptr(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {

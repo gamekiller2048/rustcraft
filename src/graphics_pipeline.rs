@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::shader_module::ShaderModule;
 use crate::vulkan_allocator::VulkanAllocator;
@@ -22,6 +22,7 @@ impl GraphicsPipeline {
         subpass: u32,
         vertex_binding_description: vk::VertexInputBindingDescription,
         vertex_attribute_description: &Vec<vk::VertexInputAttributeDescription>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let pipeline = Self::create_pipeline(
             context,
@@ -33,6 +34,7 @@ impl GraphicsPipeline {
             subpass,
             vertex_binding_description,
             vertex_attribute_description,
+            allocator,
         );
 
         Self {
@@ -42,8 +44,8 @@ impl GraphicsPipeline {
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
-        GraphicsPipeline::destroy_pipeline(context, self.pipeline);
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Arc<VulkanAllocator>) {
+        GraphicsPipeline::destroy_pipeline(context, self.pipeline, allocator);
         ShaderModule::destroy_shader_module(context, self.vertex_shader, allocator);
         ShaderModule::destroy_shader_module(context, self.fragment_shader, allocator);
     }
@@ -58,6 +60,7 @@ impl GraphicsPipeline {
         subpass: u32,
         vertex_binding_description: vk::VertexInputBindingDescription,
         vertex_attribute_description: &Vec<vk::VertexInputAttributeDescription>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> vk::Pipeline {
         let vert_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -67,7 +70,7 @@ impl GraphicsPipeline {
             stage: vk::ShaderStageFlags::VERTEX,
             module: vertex_shader,
             p_specialization_info: ptr::null(), // for constexpr's in shader
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let frag_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
@@ -78,7 +81,7 @@ impl GraphicsPipeline {
             stage: vk::ShaderStageFlags::FRAGMENT,
             module: fragment_shader,
             p_specialization_info: ptr::null(), // for constexpr's in shader
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let shader_stage_create_infos: [vk::PipelineShaderStageCreateInfo; 2] =
@@ -92,7 +95,7 @@ impl GraphicsPipeline {
             p_vertex_attribute_descriptions: vertex_attribute_description.as_ptr(),
             vertex_binding_description_count: 1,
             p_vertex_binding_descriptions: &vertex_binding_description,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let input_assembly_state_create_info = vk::PipelineInputAssemblyStateCreateInfo {
@@ -101,7 +104,7 @@ impl GraphicsPipeline {
             p_next: ptr::null(),
             primitive_restart_enable: vk::FALSE,
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let viewport = vk::Viewport {
@@ -126,7 +129,7 @@ impl GraphicsPipeline {
             p_scissors: &scissor,
             viewport_count: 1,
             p_viewports: &viewport,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo {
@@ -143,7 +146,7 @@ impl GraphicsPipeline {
             depth_bias_constant_factor: 0.0,
             depth_bias_enable: vk::FALSE,
             depth_bias_slope_factor: 0.0,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         // no multisampling for now
@@ -157,7 +160,7 @@ impl GraphicsPipeline {
             p_sample_mask: ptr::null(),
             alpha_to_one_enable: vk::FALSE,
             alpha_to_coverage_enable: vk::FALSE,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let stencil_state = vk::StencilOpState {
@@ -183,7 +186,7 @@ impl GraphicsPipeline {
             back: stencil_state,
             max_depth_bounds: 1.0,
             min_depth_bounds: 0.0,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState {
@@ -209,7 +212,7 @@ impl GraphicsPipeline {
             attachment_count: color_blend_attachment_states.len() as u32,
             p_attachments: color_blend_attachment_states.as_ptr(),
             blend_constants: [0.0, 0.0, 0.0, 0.0],
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let dynamic_states: [vk::DynamicState; 2] =
@@ -221,7 +224,7 @@ impl GraphicsPipeline {
             flags: vk::PipelineDynamicStateCreateFlags::empty(),
             dynamic_state_count: dynamic_states.len() as u32,
             p_dynamic_states: dynamic_states.as_ptr(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
@@ -252,7 +255,7 @@ impl GraphicsPipeline {
             subpass: subpass,
             base_pipeline_handle: vk::Pipeline::null(),
             base_pipeline_index: -1,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let graphics_pipeline_create_infos: [vk::GraphicsPipelineCreateInfo; 1] =
@@ -263,7 +266,7 @@ impl GraphicsPipeline {
                 .create_graphics_pipelines(
                     vk::PipelineCache::null(),
                     graphics_pipeline_create_infos.as_slice(),
-                    None,
+                    Some(&allocator.callbacks),
                 )
                 .unwrap()
         };
@@ -271,9 +274,15 @@ impl GraphicsPipeline {
         graphics_pipelines[0]
     }
 
-    pub fn destroy_pipeline(context: &VulkanContext, pipeline: vk::Pipeline) {
+    pub fn destroy_pipeline(
+        context: &VulkanContext,
+        pipeline: vk::Pipeline,
+        allocator: &Arc<VulkanAllocator>,
+    ) {
         unsafe {
-            context.device.destroy_pipeline(pipeline, None);
+            context
+                .device
+                .destroy_pipeline(pipeline, Some(&allocator.callbacks));
         }
     }
 }

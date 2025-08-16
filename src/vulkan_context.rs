@@ -1,10 +1,13 @@
 use ash::{khr, vk};
 use log::debug;
-use std::cell::RefCell;
-use std::collections::HashSet;
-use std::ffi::{CStr, c_char};
-use std::rc::Rc;
-use std::{ptr, u64};
+use std::{
+    collections::HashSet,
+    ffi::{CStr, c_char},
+    marker::PhantomData,
+    ptr,
+    sync::Arc,
+    u64,
+};
 
 use crate::vulkan_allocator::VulkanAllocator;
 
@@ -33,7 +36,6 @@ pub struct VulkanContext {
 
     pub device: ash::Device,
     pub swapchain_loader: khr::swapchain::Device,
-    pub allocator: Rc<RefCell<VulkanAllocator>>,
 }
 
 pub type ScorePhysicalDeviceFn = fn(
@@ -51,7 +53,7 @@ impl VulkanContext {
         surface: vk::SurfaceKHR,
         required_device_extensions: &[*const c_char],
         score_physical_device_fn: ScorePhysicalDeviceFn,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let (physical_device, queue_family_indices) = Self::pick_physical_device(
             &instance,
@@ -75,7 +77,6 @@ impl VulkanContext {
             queue_family_indices,
             device,
             swapchain_loader,
-            allocator: allocator.clone(),
         }
     }
 
@@ -248,7 +249,7 @@ impl VulkanContext {
         physical_device: vk::PhysicalDevice,
         queue_family_indices: &QueueFamilyIndices,
         required_device_extensions: &[*const c_char],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> ash::Device {
         let mut unique_indices: HashSet<u32> = HashSet::new();
         unique_indices.extend(&queue_family_indices.graphics);
@@ -256,7 +257,7 @@ impl VulkanContext {
         unique_indices.extend(&queue_family_indices.transfer_only);
         unique_indices.extend(&queue_family_indices.compute);
 
-        // TODO: device creates all unique queues even though not needed / priority and queue count is not changable
+        // TODO: device creates all unique queues even though not needed / only 1 queue is created for each type / priority and queue count is not changable
         let queue_priority: f32 = 1.0;
         let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
 
@@ -288,16 +289,13 @@ impl VulkanContext {
             enabled_extension_count: required_device_extensions.len() as u32,
             pp_enabled_extension_names: required_device_extensions.as_ptr(),
             p_enabled_features: &physical_device_features,
+            _marker: PhantomData,
             ..Default::default()
         };
 
         unsafe {
             instance
-                .create_device(
-                    physical_device,
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_device(physical_device, &create_info, Some(&allocator.callbacks))
                 .unwrap()
         }
     }
@@ -338,15 +336,15 @@ impl VulkanContext {
         }
     }
 
-    pub fn unmap(&self, memory: vk::DeviceMemory) {
+    pub fn unmap_memory(&self, memory: vk::DeviceMemory) {
         unsafe {
             self.device.unmap_memory(memory);
         }
     }
 
-    pub fn free_memory(&self, memory: vk::DeviceMemory) {
+    pub fn free_memory(&self, memory: vk::DeviceMemory, allocator: &Arc<VulkanAllocator>) {
         unsafe {
-            self.device.free_memory(memory, None);
+            self.device.free_memory(memory, Some(&allocator.callbacks));
         }
     }
 
@@ -380,19 +378,15 @@ impl VulkanContext {
         }
     }
 
-    pub fn destroy_device(&self) {
+    pub fn destroy_device(&self, allocator: &Arc<VulkanAllocator>) {
         unsafe {
-            self.device.destroy_device(Some(
-                &self.allocator.borrow_mut().get_allocation_callbacks(),
-            ));
+            self.device.destroy_device(Some(&allocator.callbacks));
         }
     }
 
-    pub fn destroy_instance(&self) {
+    pub fn destroy_instance(&self, allocator: &Arc<VulkanAllocator>) {
         unsafe {
-            self.instance.destroy_instance(Some(
-                &self.allocator.borrow_mut().get_allocation_callbacks(),
-            ));
+            self.instance.destroy_instance(Some(&allocator.callbacks));
         }
     }
 }

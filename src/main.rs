@@ -2,17 +2,25 @@
 #![allow(dead_code, unused_variables)]
 use ::image::{EncodableLayout, ImageReader};
 use ash::{khr, vk};
-use nalgebra_glm as glm;
+use nalgebra_glm::{self as glm};
+use rand::Rng;
 use std::{
-    cell::RefCell,
+    alloc::Global,
+    f32::consts::PI,
     ffi::{c_char, c_void},
-    fs, ptr,
-    rc::Rc,
-    slice,
+    fs,
+    marker::PhantomData,
+    ptr, slice,
+    sync::Arc,
     time::{Duration, SystemTime},
     u32,
 };
-use winit::raw_window_handle::HasWindowHandle;
+
+use winit::{
+    event::MouseButton,
+    keyboard::{KeyCode, PhysicalKey},
+    raw_window_handle::HasWindowHandle,
+};
 
 #[cfg(feature = "validation")]
 use ash::ext;
@@ -31,8 +39,10 @@ mod swapchain;
 use swapchain::Swapchain;
 
 mod descriptor_set_layout;
-use descriptor_set_layout::{DescriptorSetLayout, create_descriptor_image_sampler_write};
-use descriptor_set_layout::{DescriptorSetLayoutBuilder, create_descriptor_uniform_buffer_write};
+use descriptor_set_layout::{
+    DescriptorSetLayout, DescriptorSetLayoutBuilder, create_descriptor_image_sampler_write,
+    create_descriptor_storage_buffer_write, create_descriptor_uniform_buffer_write,
+};
 
 mod descriptor_pool;
 use descriptor_pool::DescriptorPool;
@@ -90,16 +100,33 @@ use fence::Fence;
 mod vulkan_allocator;
 use vulkan_allocator::VulkanAllocator;
 
+mod bump_allocator;
+use bump_allocator::BumpAllocator;
+
 struct TransformationData {
     proj_view: glm::Mat4,
     model: glm::Mat4,
+    time: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default)]
+struct Particle {
+    pos: glm::Vec3,
+    _pad1: f32,
+    vel: glm::Vec3,
+    _pad2: f32,
+    color: glm::Vec3,
+    _pad3: f32,
 }
 
 const MAX_FRAMES_IN_FLIGHT: usize = 1;
 
 struct Renderer {
     entry: ash::Entry,
-    vulkan_allocator: Rc<RefCell<VulkanAllocator>>,
+    bump_allocator: Arc<BumpAllocator>,
+    global_vulkan_allocator: Arc<VulkanAllocator>,
+    vulkan_allocator: Arc<VulkanAllocator>,
     context: VulkanContext,
 
     #[cfg(feature = "validation")]
@@ -118,18 +145,24 @@ struct Renderer {
 
     swapchain: Swapchain,
 
-    descriptor_set_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_sets: Vec<vk::DescriptorSet>,
-
     uniform_buffers: Vec<Buffer>,
     sampler: vk::Sampler,
+    storage_buffers: Vec<Buffer>,
+
+    graphics_descriptor_set_layout: vk::DescriptorSetLayout,
+    graphics_descriptor_sets: Vec<vk::DescriptorSet>,
+    compute_descriptor_set_layout: vk::DescriptorSetLayout,
+    compute_descriptor_sets: Vec<vk::DescriptorSet>,
+    descriptor_pool: vk::DescriptorPool,
 
     render_pass: RenderPass,
 
-    pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: GraphicsPipeline,
-    // compute_pipeline: ComputePipeline,
+
+    compute_pipeline_layout: vk::PipelineLayout,
+    compute_pipeline: vk::Pipeline,
+
     vertex_buffer: Buffer,
     index_buffer: Buffer,
 
@@ -137,15 +170,20 @@ struct Renderer {
     texture_image_view: ImageView,
 
     graphics_command_pool: CommandPool,
-    draw_command_buffers: Vec<vk::CommandBuffer>,
-
-    shader_storage_buffers: Vec<Buffer>,
+    graphics_command_buffers: Vec<vk::CommandBuffer>,
 
     transfer_command_pool: CommandPool,
+
     compute_command_pool: CommandPool,
+    compute_command_buffers: Vec<vk::CommandBuffer>,
 
     frames: FramesInFlight,
+    compute_frames: FramesInFlight,
     start_time: Duration,
+
+    camera_pos: glm::Vec3,
+    camera_orientation: glm::Vec3,
+    last_mouse: glm::Vec2,
 }
 
 impl Renderer {
@@ -238,6 +276,7 @@ impl Renderer {
         entry: &ash::Entry,
         instance: &ash::Instance,
         window: &winit::window::Window,
+        vulkan_allocator: &Arc<VulkanAllocator>,
     ) -> vk::SurfaceKHR {
         use winit::raw_window_handle::RawWindowHandle;
 
@@ -257,7 +296,7 @@ impl Renderer {
             let win32_surface_loader = khr::win32_surface::Instance::new(&entry, &instance);
             return unsafe {
                 win32_surface_loader
-                    .create_win32_surface(&surface_create_info, None)
+                    .create_win32_surface(&surface_create_info, Some(&vulkan_allocator.callbacks))
                     .unwrap()
             };
         }
@@ -273,19 +312,21 @@ impl Renderer {
             panic!("requested validation layers but not supported");
         }
 
-        let instance = instance::create_instance(&entry);
+        let bump_allocator = Arc::new(BumpAllocator::with_capacity(1500000));
+        let vulkan_allocator = VulkanAllocator::new(bump_allocator.clone(), "bump");
+        let global_vulkan_allocator = VulkanAllocator::new(Arc::new(Global), "global");
+
+        let instance = instance::create_instance(&entry, &global_vulkan_allocator);
 
         #[cfg(feature = "validation")]
         let debug_utils_loader = ext::debug_utils::Instance::new(&entry, &instance);
 
         #[cfg(feature = "validation")]
-        let debug_messager = instance::create_debug_messenger(&debug_utils_loader);
+        let debug_messager =
+            instance::create_debug_messenger(&debug_utils_loader, &vulkan_allocator);
 
         let surface_loader = khr::surface::Instance::new(&entry, &instance);
-        let surface = Self::create_surface(&entry, &instance, window);
-
-        let vulkan_allocator = Rc::new(RefCell::new(VulkanAllocator::new()));
-        // let allocation_callbacks = vulkan_allocator.get_allocation_callbacks();
+        let surface = Self::create_surface(&entry, &instance, window, &vulkan_allocator);
 
         const REQUIRED_DEVICE_EXTENSIONS: [*const c_char; 1] = [ash::khr::swapchain::NAME.as_ptr()];
         let context = VulkanContext::new(
@@ -295,7 +336,7 @@ impl Renderer {
             surface,
             &REQUIRED_DEVICE_EXTENSIONS,
             Self::score_physical_device,
-            &vulkan_allocator,
+            &global_vulkan_allocator,
         );
 
         let graphics_queue = Queue::new(
@@ -428,6 +469,13 @@ impl Renderer {
             &vulkan_allocator,
         );
 
+        let (storage_buffers, storage_staging_buffer) = Self::create_particles_storage_buffers(
+            &context,
+            &bump_allocator,
+            &vulkan_allocator,
+            initial_transfer_command_buffer.command_buffer,
+        );
+
         initial_transfer_command_buffer.end(&context);
         graphics_command_pool.submit(
             &context,
@@ -446,38 +494,101 @@ impl Renderer {
         vertex_staging_buffer.destroy(&context, &vulkan_allocator);
         index_staging_buffer.destroy(&context, &vulkan_allocator);
         texture_image_staging_buffer.destroy(&context, &vulkan_allocator);
+        storage_staging_buffer.destroy(&context, &vulkan_allocator);
 
         let uniform_buffer_binding: u32 = 0;
         let uniform_sampler_binding: u32 = 1;
+        let uniform_storage_buffer_binding_vert: u32 = 2;
         let descriptor_set_layout_builder = DescriptorSetLayoutBuilder::new()
             .add_uniform_buffer(uniform_buffer_binding, 1, vk::ShaderStageFlags::VERTEX)
-            .add_image_sampler(uniform_sampler_binding, 1, vk::ShaderStageFlags::FRAGMENT);
+            .add_image_sampler(uniform_sampler_binding, 1, vk::ShaderStageFlags::FRAGMENT)
+            .add_storage_buffer(
+                uniform_storage_buffer_binding_vert,
+                1,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::VERTEX,
+            );
 
-        let descriptor_set_layout = DescriptorSetLayout::create_descriptor_set_layout(
+        let graphics_descriptor_set_layout = DescriptorSetLayout::create_descriptor_set_layout(
             &context,
             &descriptor_set_layout_builder.bindings,
             &vulkan_allocator,
         );
 
-        let max_sets = MAX_FRAMES_IN_FLIGHT as u32;
-        let pool_sizes = descriptor_set_layout_builder.calculate_pool_sizes(max_sets);
-        let descriptor_pool = DescriptorPool::create_descriptor_pool(
+        let uniform_buffers = Self::create_uniform_buffers(&context, &vulkan_allocator);
+        let sampler = Self::create_texture_sampler(&context, &vulkan_allocator);
+
+        let uniform_storage_buffer_binding: u32 = 0;
+        let compute_descriptor_set_layout_builder = DescriptorSetLayoutBuilder::new()
+            .add_storage_buffer(
+                uniform_storage_buffer_binding,
+                1,
+                vk::ShaderStageFlags::COMPUTE,
+            )
+            .add_storage_buffer(
+                uniform_storage_buffer_binding + 1,
+                1,
+                vk::ShaderStageFlags::COMPUTE,
+            );
+
+        let compute_descriptor_set_layout = DescriptorSetLayout::create_descriptor_set_layout(
             &context,
-            &pool_sizes,
-            max_sets,
+            &compute_descriptor_set_layout_builder.bindings,
             &vulkan_allocator,
         );
 
+        let max_sets = MAX_FRAMES_IN_FLIGHT as u32;
+        let mut descriptor_counts =
+            descriptor_set_layout_builder.calculate_descriptor_counts(max_sets);
+
+        for (descriptor_type, count) in
+            compute_descriptor_set_layout_builder.calculate_descriptor_counts(max_sets)
+        {
+            let counts = descriptor_counts.get_mut(&descriptor_type);
+
+            if counts.is_some() {
+                *counts.unwrap() += count;
+            } else {
+                descriptor_counts.insert(descriptor_type, count);
+            }
+        }
+
+        let mut pool_sizes: Vec<vk::DescriptorPoolSize, &BumpAllocator> = Vec::with_capacity_in(
+            descriptor_set_layout_builder.bindings.len()
+                + compute_descriptor_set_layout_builder.bindings.len(),
+            &bump_allocator,
+        );
+
+        for (descriptor_type, count) in descriptor_counts.into_iter() {
+            pool_sizes.push(vk::DescriptorPoolSize {
+                ty: descriptor_type,
+                descriptor_count: count,
+            });
+        }
+
+        let descriptor_pool = DescriptorPool::create_descriptor_pool(
+            &context,
+            &pool_sizes,
+            max_sets * 2,
+            &vulkan_allocator,
+        );
+
+        drop(pool_sizes);
+
         let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> =
-            vec![descriptor_set_layout; max_sets as usize];
-        let descriptor_sets = DescriptorPool::create_descriptor_sets(
+            vec![graphics_descriptor_set_layout; max_sets as usize];
+        let graphics_descriptor_sets = DescriptorPool::create_descriptor_sets(
             &context,
             descriptor_pool,
             &descriptor_set_layouts,
         );
 
-        let uniform_buffers = Self::create_uniform_buffers(&context, &vulkan_allocator);
-        let sampler = Self::create_texture_sampler(&context, &vulkan_allocator);
+        let compute_descriptor_set_layouts: Vec<vk::DescriptorSetLayout> =
+            vec![compute_descriptor_set_layout; max_sets as usize];
+        let compute_descriptor_sets = DescriptorPool::create_descriptor_sets(
+            &context,
+            descriptor_pool,
+            &compute_descriptor_set_layouts,
+        );
 
         for i in 0..max_sets as usize {
             let buffer_info = vk::DescriptorBufferInfo {
@@ -487,7 +598,7 @@ impl Renderer {
             };
 
             let buffer_write = create_descriptor_uniform_buffer_write(
-                descriptor_sets[i],
+                graphics_descriptor_sets[i],
                 &buffer_info,
                 uniform_buffer_binding,
                 0,
@@ -501,14 +612,51 @@ impl Renderer {
             };
 
             let image_write = create_descriptor_image_sampler_write(
-                descriptor_sets[i],
+                graphics_descriptor_sets[i],
                 &image_info,
                 uniform_sampler_binding,
                 0,
                 1,
             );
 
-            let descriptor_writes: [vk::WriteDescriptorSet; 2] = [buffer_write, image_write];
+            let storage_buffer_info = vk::DescriptorBufferInfo {
+                buffer: storage_buffers[(i + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT]
+                    .buffer,
+                offset: 0,
+                range: vk::WHOLE_SIZE,
+            };
+
+            let storage_buffer_write_in_vert = create_descriptor_storage_buffer_write(
+                graphics_descriptor_sets[i],
+                &storage_buffer_info,
+                uniform_storage_buffer_binding_vert,
+                0,
+                1,
+            );
+
+            let storage_buffer_write_in = create_descriptor_storage_buffer_write(
+                compute_descriptor_sets[i],
+                &storage_buffer_info,
+                uniform_storage_buffer_binding,
+                0,
+                1,
+            );
+
+            let storage_buffer_write_out = create_descriptor_storage_buffer_write(
+                compute_descriptor_sets[i],
+                &storage_buffer_info,
+                uniform_storage_buffer_binding + 1,
+                0,
+                1,
+            );
+
+            let descriptor_writes: [vk::WriteDescriptorSet; 5] = [
+                buffer_write,
+                image_write,
+                storage_buffer_write_in_vert,
+                storage_buffer_write_in,
+                storage_buffer_write_out,
+            ];
 
             DescriptorPool::write_descriptors(&context, &descriptor_writes, &[]);
         }
@@ -517,7 +665,7 @@ impl Renderer {
             &context,
             swapchain_format.format,
             depth_format,
-            &vulkan_allocator,
+            &global_vulkan_allocator,
         );
 
         let swapchain = Swapchain::new(
@@ -536,30 +684,30 @@ impl Renderer {
             graphics_queue.family_index,
             present_queue.family_index,
             &render_pass,
-            &vulkan_allocator,
+            &global_vulkan_allocator,
         );
 
         let vertex_shader = ShaderModule::create_shader_module(
             &context,
             &fs::read("res/shader.vert.spv").unwrap(),
-            &vulkan_allocator,
+            &global_vulkan_allocator,
         );
         let fragment_shader = ShaderModule::create_shader_module(
             &context,
             &fs::read("res/shader.frag.spv").unwrap(),
-            &vulkan_allocator,
+            &global_vulkan_allocator,
         );
 
-        let pipeline_layout = PipelineLayout::create_pipeline_layout(
+        let graphics_pipeline_layout = PipelineLayout::create_pipeline_layout(
             &context,
-            slice::from_ref(&descriptor_set_layout),
+            slice::from_ref(&graphics_descriptor_set_layout),
             &[],
             &vulkan_allocator,
         );
 
         let graphics_pipeline = GraphicsPipeline::new(
             &context,
-            pipeline_layout,
+            graphics_pipeline_layout,
             vertex_shader,
             fragment_shader,
             swapchain_extent,
@@ -567,9 +715,10 @@ impl Renderer {
             0,
             MyVertex::get_binding_description(),
             &MyVertex::get_attribute_description(),
+            &global_vulkan_allocator,
         );
 
-        let draw_command_buffers = CommandBuffer::create_command_buffers(
+        let graphics_command_buffers = CommandBuffer::create_command_buffers(
             &context,
             graphics_command_pool.command_pool,
             vk::CommandBufferLevel::PRIMARY,
@@ -584,13 +733,27 @@ impl Renderer {
             &vulkan_allocator,
         );
 
-        let shader_storage_buffers = vec![]; //Self::create_shader_storage_buffers(&context);
         let compute_shader = ShaderModule::create_shader_module(
             &context,
             &fs::read("res/shader.comp.spv").unwrap(),
             &vulkan_allocator,
         );
-        // let compute_pipeline: ComputePipeline = ComputePipeline::new();
+
+        let compute_pipeline_layout = PipelineLayout::create_pipeline_layout(
+            &context,
+            slice::from_ref(&compute_descriptor_set_layout),
+            &[],
+            &vulkan_allocator,
+        );
+
+        let compute_pipeline = ComputePipeline::create_pipeline(
+            &context,
+            compute_pipeline_layout,
+            compute_shader,
+            &vulkan_allocator,
+        );
+
+        ShaderModule::destroy_shader_module(&context, compute_shader, &vulkan_allocator);
 
         let compute_command_pool = CommandPool::new(
             &context,
@@ -600,11 +763,29 @@ impl Renderer {
             &vulkan_allocator,
         );
 
+        let compute_command_buffers = if graphics_queue.family_index == compute_queue.family_index {
+            vec![]
+        } else {
+            CommandBuffer::create_command_buffers(
+                &context,
+                graphics_command_pool.command_pool,
+                vk::CommandBufferLevel::PRIMARY,
+                MAX_FRAMES_IN_FLIGHT as u32,
+            )
+        };
+
         let frames = FramesInFlight::new(&context, MAX_FRAMES_IN_FLIGHT, &vulkan_allocator);
+        let compute_frames = if graphics_queue.family_index == compute_queue.family_index {
+            FramesInFlight::new(&context, 0, &vulkan_allocator)
+        } else {
+            FramesInFlight::new(&context, MAX_FRAMES_IN_FLIGHT, &vulkan_allocator)
+        };
 
         Self {
             entry,
+            bump_allocator,
             vulkan_allocator,
+            global_vulkan_allocator,
             context,
 
             #[cfg(feature = "validation")]
@@ -620,33 +801,42 @@ impl Renderer {
             transfer_queue,
             compute_queue,
             swapchain,
-            descriptor_set_layout,
+            graphics_descriptor_set_layout,
             descriptor_pool,
-            descriptor_sets,
+            graphics_descriptor_sets,
             uniform_buffers,
             sampler,
             render_pass,
-            pipeline_layout,
+            graphics_pipeline_layout,
             graphics_pipeline,
             graphics_command_pool,
-            draw_command_buffers,
+            graphics_command_buffers,
             vertex_buffer,
             index_buffer,
             texture_image,
             texture_image_view,
             transfer_command_pool,
             compute_command_pool,
-            shader_storage_buffers,
+            compute_pipeline_layout,
+            compute_pipeline,
+            storage_buffers,
+            compute_command_buffers,
+            compute_descriptor_set_layout,
+            compute_descriptor_sets,
             frames,
+            compute_frames,
             start_time: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap(),
+            camera_pos: glm::vec3(0.0, 0.0, -50.5),
+            camera_orientation: glm::vec3(0.0, 0.0, 1.0).normalize(),
+            last_mouse: glm::vec2(0.0, 0.0),
         }
     }
 
     fn create_texture_sampler(
         context: &VulkanContext,
-        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
+        vulkan_allocator: &Arc<VulkanAllocator>,
     ) -> vk::Sampler {
         let properties: vk::PhysicalDeviceProperties = unsafe {
             context
@@ -673,16 +863,13 @@ impl Renderer {
             max_lod: 0.0,
             border_color: vk::BorderColor::INT_OPAQUE_BLACK,
             unnormalized_coordinates: vk::FALSE,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
             context
                 .device
-                .create_sampler(
-                    &create_info,
-                    Some(&vulkan_allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_sampler(&create_info, Some(&vulkan_allocator.callbacks))
                 .unwrap()
         }
     }
@@ -703,18 +890,22 @@ impl Renderer {
 
         if swapchain_format != self.swapchain.format {
             self.render_pass
-                .destroy(&self.context, &self.vulkan_allocator);
+                .destroy(&self.context, &self.global_vulkan_allocator);
             self.render_pass = Self::create_render_pass(
                 &self.context,
                 swapchain_format.format,
                 self.swapchain.depth_format,
-                &self.vulkan_allocator,
+                &self.global_vulkan_allocator,
             );
 
-            GraphicsPipeline::destroy_pipeline(&self.context, self.graphics_pipeline.pipeline);
+            GraphicsPipeline::destroy_pipeline(
+                &self.context,
+                self.graphics_pipeline.pipeline,
+                &self.global_vulkan_allocator,
+            );
             self.graphics_pipeline = GraphicsPipeline::new(
                 &self.context,
-                self.pipeline_layout,
+                self.graphics_pipeline_layout,
                 self.graphics_pipeline.vertex_shader,
                 self.graphics_pipeline.fragment_shader,
                 swapchain_extent,
@@ -722,6 +913,7 @@ impl Renderer {
                 0,
                 MyVertex::get_binding_description(),
                 &MyVertex::get_attribute_description(),
+                &self.global_vulkan_allocator,
             );
         }
 
@@ -733,7 +925,7 @@ impl Renderer {
             swapchain_extent,
             &swapchain_details,
             &self.render_pass,
-            &self.vulkan_allocator,
+            &self.global_vulkan_allocator,
         );
     }
 
@@ -749,8 +941,8 @@ impl Renderer {
                 0.01,
                 1000.0,
             ) * glm::look_at(
-                &glm::vec3(0.0, 0.0, -10.5),
-                &glm::vec3(0.0, 0.0, 0.0),
+                &self.camera_pos,
+                &(self.camera_pos + self.camera_orientation),
                 &glm::vec3(0.0, 1.0, 0.0),
             ),
             model: glm::rotate(
@@ -762,6 +954,7 @@ impl Renderer {
                 (now - self.start_time).as_millis() as f32 / 1000.0,
                 &glm::vec3(0.0, 1.0, 0.0),
             ),
+            time: (now - self.start_time).as_millis() as f32 / 1000.0,
         };
 
         unsafe {
@@ -774,7 +967,51 @@ impl Renderer {
         }
     }
 
-    fn draw_frame(&mut self, window: &winit::window::Window, window_resized: bool) {
+    fn draw_frame(
+        &mut self,
+        key_map: &Vec<bool>,
+        mouse_map: &Vec<bool>,
+        mouse_pos: &glm::Vec2,
+        window: &winit::window::Window,
+        window_resized: bool,
+    ) {
+        if key_map[KeyCode::KeyW as usize] {
+            self.camera_pos += self.camera_orientation * 0.01;
+        }
+        if key_map[KeyCode::KeyS as usize] {
+            self.camera_pos -= self.camera_orientation * 0.01;
+        }
+        if key_map[KeyCode::KeyA as usize] {
+            self.camera_pos -= self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)) * 0.01;
+        }
+        if key_map[KeyCode::KeyD as usize] {
+            self.camera_pos += self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)) * 0.01;
+        }
+        if key_map[KeyCode::Space as usize] {
+            self.camera_pos -= glm::vec3(0.0, 1.0, 0.0) * 0.01;
+        }
+        if key_map[KeyCode::ShiftLeft as usize] {
+            self.camera_pos += glm::vec3(0.0, 1.0, 0.0) * 0.01;
+        }
+
+        if mouse_map[0] {
+            let mut diff = mouse_pos - self.last_mouse;
+            if diff.magnitude() > 0.0 {
+                diff = diff.normalize() * 0.01;
+
+                self.camera_orientation = glm::rotate_vec3(
+                    &self.camera_orientation,
+                    diff.y,
+                    &self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)),
+                );
+
+                self.camera_orientation =
+                    glm::rotate_vec3(&self.camera_orientation, -diff.x, &glm::vec3(0.0, 1.0, 0.0));
+
+                self.last_mouse = mouse_pos.clone();
+            }
+        }
+
         let size = window.inner_size();
 
         if window_resized {
@@ -782,6 +1019,52 @@ impl Renderer {
             return;
         }
 
+        // COMPUTE
+        if self.compute_queue.family_index != self.graphics_queue.family_index {
+            unsafe {
+                self.context
+                    .device
+                    .wait_for_fences(
+                        std::slice::from_ref(&self.compute_frames.current_frame().in_flight_fence),
+                        true,
+                        u64::MAX,
+                    )
+                    .unwrap();
+
+                self.context
+                    .device
+                    .reset_fences(std::slice::from_ref(
+                        &self.frames.current_frame().in_flight_fence,
+                    ))
+                    .unwrap();
+            }
+
+            self.record_compute_commands();
+
+            let wait_stages: [vk::PipelineStageFlags; 1] =
+                [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+            self.compute_command_pool.submit(
+                &self.context,
+                slice::from_ref(&self.compute_command_buffers[self.frames.curr_frame]),
+                slice::from_ref(
+                    &self
+                        .compute_frames
+                        .current_frame()
+                        .swap_image_available_semaphore,
+                ),
+                &wait_stages,
+                slice::from_ref(
+                    &self
+                        .compute_frames
+                        .current_frame()
+                        .render_finished_semaphore,
+                ),
+                self.compute_frames.current_frame().in_flight_fence,
+            );
+        }
+
+        // GRAPHICS
         unsafe {
             self.context
                 .device
@@ -804,8 +1087,8 @@ impl Renderer {
 
         let image_index: u32;
 
-        // NOTE: if suboptimal finish this frame's submission so calling waitIdle will wait for image_available_semaphore to finish and recreate swapchain.
-        // TODO: it might be better to just submit an empty command buffer waiting on image_available_semaphore so I don't need to finish the frame.
+        // NOTE: if suboptimal, this won't return and will finish this frame's submission so calling waitIdle will wait for image_available_semaphore to finish and recreate swapchain.
+        // TODO: it might be faster to discard this frame and just submit an empty command buffer waiting on image_available_semaphore.
         let mut acquire_suboptimal = false;
 
         match result {
@@ -835,7 +1118,7 @@ impl Renderer {
                 .unwrap();
         }
 
-        self.record_commands(image_index);
+        self.record_graphics_commands(image_index);
         self.update_uniform_buffers();
 
         let wait_stages: [vk::PipelineStageFlags; 1] =
@@ -843,7 +1126,7 @@ impl Renderer {
 
         self.graphics_command_pool.submit(
             &self.context,
-            slice::from_ref(&self.draw_command_buffers[self.frames.curr_frame]),
+            slice::from_ref(&self.graphics_command_buffers[self.frames.curr_frame]),
             slice::from_ref(&self.frames.current_frame().swap_image_available_semaphore),
             &wait_stages,
             slice::from_ref(&self.frames.current_frame().render_finished_semaphore),
@@ -859,7 +1142,7 @@ impl Renderer {
             p_swapchains: &self.swapchain.swapchain,
             p_image_indices: &image_index,
             p_results: ptr::null_mut(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let result = unsafe {
@@ -881,9 +1164,9 @@ impl Renderer {
         self.frames.step();
     }
 
-    fn record_commands(&self, swap_image_index: u32) {
+    fn record_graphics_commands(&self, swap_image_index: u32) {
         let cmd = CommandBuffer {
-            command_buffer: self.draw_command_buffers[self.frames.curr_frame],
+            command_buffer: self.graphics_command_buffers[self.frames.curr_frame],
         };
 
         cmd.reset(&self.context);
@@ -960,15 +1243,15 @@ impl Renderer {
             self.context.device.cmd_bind_descriptor_sets(
                 cmd.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
+                self.graphics_pipeline_layout,
                 0,
-                slice::from_ref(&self.descriptor_sets[self.frames.curr_frame]),
+                slice::from_ref(&self.graphics_descriptor_sets[self.frames.curr_frame]),
                 &[],
             );
             self.context.device.cmd_draw_indexed(
                 cmd.command_buffer,
                 INDICES.len() as u32,
-                1,
+                10240,
                 0,
                 0,
                 0,
@@ -976,6 +1259,60 @@ impl Renderer {
         }
 
         cmd.end_render_pass(&self.context);
+
+        cmd.bind_pipeline(
+            &self.context,
+            vk::PipelineBindPoint::COMPUTE,
+            self.compute_pipeline,
+        );
+
+        unsafe {
+            self.context.device.cmd_bind_descriptor_sets(
+                cmd.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.compute_pipeline_layout,
+                0,
+                slice::from_ref(&self.compute_descriptor_sets[self.frames.curr_frame]),
+                &[],
+            );
+
+            self.context
+                .device
+                .cmd_dispatch(cmd.command_buffer, 40, 1, 1);
+        }
+
+        cmd.end(&self.context);
+    }
+
+    fn record_compute_commands(&self) {
+        let cmd = CommandBuffer {
+            command_buffer: self.compute_command_buffers[self.compute_frames.curr_frame],
+        };
+
+        cmd.reset(&self.context);
+        cmd.begin(&self.context, vk::CommandBufferUsageFlags::empty());
+
+        cmd.bind_pipeline(
+            &self.context,
+            vk::PipelineBindPoint::COMPUTE,
+            self.compute_pipeline,
+        );
+
+        unsafe {
+            self.context.device.cmd_bind_descriptor_sets(
+                cmd.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.compute_pipeline_layout,
+                0,
+                slice::from_ref(&self.compute_descriptor_sets[self.frames.curr_frame]),
+                &[],
+            );
+
+            self.context
+                .device
+                .cmd_dispatch(cmd.command_buffer, 40, 1, 1);
+        }
+
         cmd.end(&self.context);
     }
 
@@ -983,7 +1320,7 @@ impl Renderer {
         context: &VulkanContext,
         swapchain_format: vk::Format,
         depth_image_format: vk::Format,
-        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
+        vulkan_allocator: &Arc<VulkanAllocator>,
     ) -> RenderPass {
         let color_attachment = vk::AttachmentDescription {
             format: swapchain_format,
@@ -1034,7 +1371,7 @@ impl Renderer {
             p_preserve_attachments: ptr::null(),
             input_attachment_count: 0,
             preserve_attachment_count: 0,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let dependency = vk::SubpassDependency {
@@ -1065,7 +1402,7 @@ impl Renderer {
 
     fn create_uniform_buffers(
         context: &VulkanContext,
-        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
+        vulkan_allocator: &Arc<VulkanAllocator>,
     ) -> Vec<Buffer> {
         let buffer_size: vk::DeviceSize = size_of::<TransformationData>() as u64;
         let mut uniform_buffers: Vec<Buffer> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -1091,17 +1428,39 @@ impl Renderer {
         uniform_buffers
     }
 
-    fn create_shader_storage_buffers(
+    fn create_particles_storage_buffers(
         context: &VulkanContext,
-        vulkan_allocator: &Rc<RefCell<VulkanAllocator>>,
-    ) -> Vec<Buffer> {
-        let buffer_size: vk::DeviceSize = size_of::<TransformationData>() as u64;
+        bump_allocator: &BumpAllocator,
+        vulkan_allocator: &Arc<VulkanAllocator>,
+        transfer_command_buffer: vk::CommandBuffer,
+    ) -> (Vec<Buffer>, Buffer) {
+        let particles = Self::generate_particles(bump_allocator);
+
+        let buffer_size: vk::DeviceSize = (size_of::<Particle>() * particles.len()) as u64;
+        let mut staging_buffer = Buffer::new(
+            context,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::SharingMode::EXCLUSIVE,
+            &[],
+            vulkan_allocator,
+        );
+
+        staging_buffer.mapped_memory = context.map_memory(staging_buffer.memory, 0, buffer_size);
+        unsafe {
+            staging_buffer
+                .mapped_memory
+                .copy_from_nonoverlapping(particles.as_ptr() as *mut c_void, buffer_size as usize);
+        }
+        context.unmap_memory(staging_buffer.memory);
+
         let mut ssbos: Vec<Buffer> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buffer_memory, buffer) = Buffer::create_buffer(
+            let buffer = Buffer::new(
                 &context,
-                0,
+                buffer_size,
                 vk::BufferUsageFlags::VERTEX_BUFFER
                     | vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST,
@@ -1111,18 +1470,56 @@ impl Renderer {
                 &vulkan_allocator,
             );
 
-            ssbos.push(Buffer {
-                buffer,
-                memory: buffer_memory,
-                mapped_memory: ptr::null_mut(),
-            });
+            Buffer::copy_buffer(
+                context,
+                staging_buffer.buffer,
+                buffer.buffer,
+                buffer_size,
+                transfer_command_buffer,
+            );
+            ssbos.push(buffer);
         }
 
-        ssbos
+        (ssbos, staging_buffer)
     }
 
-    fn generate_particles() {
-        // let particles: Vec<Particle> = Vec::with_capacity(100);
+    fn generate_particles(bump_allocator: &BumpAllocator) -> Vec<Particle, &BumpAllocator> {
+        let mut particles: Vec<Particle, &BumpAllocator> =
+            Vec::with_capacity_in(10240, bump_allocator);
+
+        let mut rng = rand::rng();
+
+        for i in 0..particles.capacity() {
+            // let theta = (1.0 - 2.0 * rng.random::<f32>()).acos();
+            // let phi = rng.random::<f32>() * 2.0 * PI;
+            // let pos = glm::vec3(
+            //     phi.cos() * theta.sin(),
+            //     phi.sin() * theta.sin(),
+            //     theta.cos(),
+            // ) * 5.0;
+            let pos = glm::vec3(
+                rng.random::<f32>() - 0.5,
+                rng.random::<f32>() - 0.5,
+                rng.random::<f32>() - 0.5,
+            )
+            .normalize();
+
+            let color = glm::vec3(
+                rng.random::<f32>(),
+                rng.random::<f32>(),
+                rng.random::<f32>(),
+            );
+
+            particles.push(Particle {
+                pos,
+                vel: pos * 0.01,
+                color,
+                ..Default::default()
+            });
+        }
+        println!("{:?}", particles[0]);
+
+        particles
     }
 }
 
@@ -1130,8 +1527,10 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         #[cfg(feature = "validation")]
         unsafe {
-            self.debug_utils_loader
-                .destroy_debug_utils_messenger(self.debug_messager, None);
+            self.debug_utils_loader.destroy_debug_utils_messenger(
+                self.debug_messager,
+                Some(&self.vulkan_allocator.callbacks),
+            );
         }
 
         self.context.wait_idle();
@@ -1154,6 +1553,7 @@ impl Drop for Renderer {
             );
 
             self.uniform_buffers[i].destroy(&self.context, &self.vulkan_allocator);
+            self.storage_buffers[i].destroy(&self.context, &self.vulkan_allocator);
         }
 
         Sampler::destroy_sampler(&self.context, self.sampler, &self.vulkan_allocator);
@@ -1165,19 +1565,27 @@ impl Drop for Renderer {
         );
         DescriptorSetLayout::destroy_descriptor_set_layout(
             &self.context,
-            self.descriptor_set_layout,
+            self.graphics_descriptor_set_layout,
+            &self.vulkan_allocator,
+        );
+
+        DescriptorSetLayout::destroy_descriptor_set_layout(
+            &self.context,
+            self.compute_descriptor_set_layout,
             &self.vulkan_allocator,
         );
 
         PipelineLayout::destroy_pipeline_layout(
             &self.context,
-            self.pipeline_layout,
+            self.graphics_pipeline_layout,
             &self.vulkan_allocator,
         );
-        self.graphics_pipeline
-            .destroy(&self.context, &self.vulkan_allocator);
-        self.render_pass
-            .destroy(&self.context, &self.vulkan_allocator);
+
+        PipelineLayout::destroy_pipeline_layout(
+            &self.context,
+            self.compute_pipeline_layout,
+            &self.vulkan_allocator,
+        );
 
         self.vertex_buffer
             .destroy(&self.context, &self.vulkan_allocator);
@@ -1197,10 +1605,25 @@ impl Drop for Renderer {
             .destroy(&self.context, &self.vulkan_allocator);
 
         self.swapchain
-            .destroy(&self.context, &self.vulkan_allocator);
-        unsafe { self.surface_loader.destroy_surface(self.surface, None) }
-        self.context.destroy_device();
-        self.context.destroy_instance();
+            .destroy(&self.context, &self.global_vulkan_allocator);
+
+        self.graphics_pipeline
+            .destroy(&self.context, &self.global_vulkan_allocator);
+        self.render_pass
+            .destroy(&self.context, &self.global_vulkan_allocator);
+
+        ComputePipeline::destroy_pipeline(
+            &self.context,
+            self.compute_pipeline,
+            &self.vulkan_allocator,
+        );
+
+        unsafe {
+            self.surface_loader
+                .destroy_surface(self.surface, Some(&self.vulkan_allocator.callbacks))
+        }
+        self.context.destroy_device(&self.global_vulkan_allocator);
+        self.context.destroy_instance(&self.global_vulkan_allocator);
     }
 }
 
@@ -1209,6 +1632,19 @@ struct App {
     window: Option<winit::window::Window>,
     renderer: Option<Renderer>,
     window_resized: bool,
+    key_map: Vec<bool>,
+    mouse_map: Vec<bool>,
+    mouse_pos: glm::Vec2,
+}
+
+impl App {
+    fn new() -> Self {
+        Self {
+            key_map: vec![false; 100],
+            mouse_map: vec![false; 10],
+            ..Default::default()
+        }
+    }
 }
 
 impl winit::application::ApplicationHandler for App {
@@ -1236,11 +1672,39 @@ impl winit::application::ApplicationHandler for App {
                     self.window_resized = true;
                 }
             }
+            winit::event::WindowEvent::KeyboardInput {
+                device_id,
+                event,
+                is_synthetic,
+            } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    self.key_map[code as usize] = event.state.is_pressed();
+                }
+            }
+            winit::event::WindowEvent::CursorMoved {
+                device_id,
+                position,
+            } => {
+                self.mouse_pos.x = position.x as f32;
+                self.mouse_pos.y = position.y as f32;
+            }
+            winit::event::WindowEvent::MouseInput {
+                device_id,
+                state,
+                button,
+            } => {
+                if let MouseButton::Left = button {
+                    self.mouse_map[0] = state.is_pressed();
+                }
+            }
             winit::event::WindowEvent::RedrawRequested => {
-                self.renderer
-                    .as_mut()
-                    .unwrap()
-                    .draw_frame(self.window.as_ref().unwrap(), self.window_resized);
+                self.renderer.as_mut().unwrap().draw_frame(
+                    &self.key_map,
+                    &self.mouse_map,
+                    &self.mouse_pos,
+                    self.window.as_ref().unwrap(),
+                    self.window_resized,
+                );
 
                 self.window.as_ref().unwrap().request_redraw();
 
@@ -1254,11 +1718,12 @@ impl winit::application::ApplicationHandler for App {
 }
 
 fn main() {
+    println!("{}", size_of::<Particle>());
     env_logger::init();
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let mut app: App = Default::default();
+    let mut app = App::new();
     event_loop.run_app(&mut app).unwrap();
 }

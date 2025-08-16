@@ -1,7 +1,5 @@
 use ash::vk;
-use std::cell::RefCell;
-use std::ptr;
-use std::rc::Rc;
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::buffer::Buffer;
 use crate::vulkan_allocator::VulkanAllocator;
@@ -26,7 +24,7 @@ impl Image {
         properties: vk::MemoryPropertyFlags,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (vk::Image, vk::DeviceMemory) {
         let create_info = vk::ImageCreateInfo {
             s_type: vk::StructureType::IMAGE_CREATE_INFO,
@@ -48,16 +46,13 @@ impl Image {
             queue_family_index_count: queue_family_indices.len() as u32,
             p_queue_family_indices: queue_family_indices.as_ptr(),
             initial_layout: vk::ImageLayout::UNDEFINED,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let image: vk::Image = unsafe {
             context
                 .device
-                .create_image(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_image(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         };
 
@@ -70,16 +65,13 @@ impl Image {
             allocation_size: mem_requirements.size,
             memory_type_index: context
                 .find_memory_type(mem_requirements.memory_type_bits, properties),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let image_memory: vk::DeviceMemory = unsafe {
             context
                 .device
-                .allocate_memory(
-                    &allocate_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .allocate_memory(&allocate_info, Some(&allocator.callbacks))
                 .unwrap()
         };
 
@@ -96,13 +88,12 @@ impl Image {
     pub fn destroy_image(
         context: &VulkanContext,
         image: vk::Image,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_image(
-                image,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_image(image, Some(&allocator.callbacks));
         }
     }
 
@@ -116,7 +107,7 @@ impl Image {
         transfer_command_buffer: vk::CommandBuffer,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (Self, Buffer) {
         let buffer_size: vk::DeviceSize = (size_of::<u8>() * pixels.len()) as u64;
 
@@ -135,7 +126,7 @@ impl Image {
         unsafe {
             data_ptr.copy_from_nonoverlapping(pixels.as_ptr(), pixels.len());
         }
-        context.unmap(staging_buffer_memory);
+        context.unmap_memory(staging_buffer_memory);
 
         let (texture_image, texture_image_memory) = Self::create_image(
             context,
@@ -213,7 +204,7 @@ impl Image {
                 level_count: 1,
                 layer_count: 1,
             },
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let source_stage: vk::PipelineStageFlags;
@@ -292,18 +283,17 @@ impl Image {
     pub fn destory_image(
         context: &VulkanContext,
         image: vk::Image,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_image(
-                image,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_image(image, Some(&allocator.callbacks));
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Arc<VulkanAllocator>) {
         Self::destory_image(context, self.image, allocator);
-        context.free_memory(self.memory);
+        context.free_memory(self.memory, allocator);
     }
 }

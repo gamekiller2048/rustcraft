@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ffi::c_void, ptr, rc::Rc};
+use std::{ffi::c_void, marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -17,14 +17,14 @@ impl Buffer {
         transfer_command_buffer: vk::CommandBuffer,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (Self, Self) {
         let buffer_size: vk::DeviceSize = (size_of::<T>() * vertices.len()) as u64;
         let (staging_buffer_memory, staging_buffer): (vk::DeviceMemory, vk::Buffer) =
             Self::create_buffer(
                 context,
                 buffer_size,
-                vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::BufferUsageFlags::TRANSFER_SRC,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::SharingMode::EXCLUSIVE,
                 &[],
@@ -35,7 +35,7 @@ impl Buffer {
         unsafe {
             data_ptr.copy_from_nonoverlapping(vertices.as_ptr(), vertices.len());
         }
-        context.unmap(staging_buffer_memory);
+        context.unmap_memory(staging_buffer_memory);
 
         let (vertex_buffer_memory, vertex_buffer): (vk::DeviceMemory, vk::Buffer) =
             Self::create_buffer(
@@ -76,14 +76,14 @@ impl Buffer {
         transfer_command_buffer: vk::CommandBuffer,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (Self, Self) {
         let buffer_size: vk::DeviceSize = (size_of::<T>() * indices.len()) as u64;
         let (staging_buffer_memory, staging_buffer): (vk::DeviceMemory, vk::Buffer) =
             Self::create_buffer(
                 context,
                 buffer_size,
-                vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::BufferUsageFlags::TRANSFER_SRC,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::SharingMode::EXCLUSIVE,
                 &[],
@@ -94,7 +94,7 @@ impl Buffer {
         unsafe {
             data_ptr.copy_from_nonoverlapping(indices.as_ptr(), indices.len());
         }
-        context.unmap(staging_buffer_memory);
+        context.unmap_memory(staging_buffer_memory);
 
         let (index_buffer_memory, index_buffer): (vk::DeviceMemory, vk::Buffer) =
             Self::create_buffer(
@@ -136,7 +136,7 @@ impl Buffer {
         properties: vk::MemoryPropertyFlags,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let (memory, buffer) = Self::create_buffer(
             context,
@@ -155,13 +155,12 @@ impl Buffer {
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Arc<VulkanAllocator>) {
         Self::destroy_buffer(context, self.buffer, allocator);
         unsafe {
-            context.device.free_memory(
-                self.memory,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .free_memory(self.memory, Some(&allocator.callbacks));
         }
     }
 
@@ -172,7 +171,7 @@ impl Buffer {
         properties: vk::MemoryPropertyFlags,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (vk::DeviceMemory, vk::Buffer) {
         let create_info = vk::BufferCreateInfo {
             s_type: vk::StructureType::BUFFER_CREATE_INFO,
@@ -183,16 +182,13 @@ impl Buffer {
             sharing_mode: sharing_mode,
             queue_family_index_count: queue_family_indices.len() as u32,
             p_queue_family_indices: queue_family_indices.as_ptr(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let buffer: vk::Buffer = unsafe {
             context
                 .device
-                .create_buffer(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_buffer(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         };
 
@@ -205,16 +201,13 @@ impl Buffer {
             allocation_size: mem_requirements.size,
             memory_type_index: context
                 .find_memory_type(mem_requirements.memory_type_bits, properties),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let buffer_memory: vk::DeviceMemory = unsafe {
             context
                 .device
-                .allocate_memory(
-                    &allocate_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .allocate_memory(&allocate_info, Some(&allocator.callbacks))
                 .unwrap()
         };
 
@@ -254,13 +247,12 @@ impl Buffer {
     pub fn destroy_buffer(
         context: &VulkanContext,
         buffer: vk::Buffer,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_buffer(
-                buffer,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_buffer(buffer, Some(&allocator.callbacks));
         }
     }
 }

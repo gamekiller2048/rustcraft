@@ -1,35 +1,42 @@
 use ash::vk;
 use log::{error, trace};
 use std::{
-    alloc::{Allocator, Global, Layout},
+    alloc::{Allocator, Layout},
+    cmp::min,
     collections::HashMap,
     ffi::c_void,
     marker::PhantomData,
     ptr::{self, NonNull},
+    sync::{Arc, Mutex},
 };
 
-#[derive(Default)]
 pub struct VulkanAllocator {
-    pub memory_layouts: HashMap<*mut c_void, Layout>,
+    pub memory_layouts: Mutex<HashMap<*mut c_void, Layout>>,
+    pub allocator: Arc<dyn Allocator + Send + Sync>,
+    pub callbacks: vk::AllocationCallbacks<'static>,
+    pub name: String,
 }
 
 impl VulkanAllocator {
-    pub fn new() -> Self {
-        Self {
-            memory_layouts: HashMap::new(),
-        }
-    }
+    pub fn new(allocator: Arc<dyn Allocator + Send + Sync>, name: &str) -> Arc<Self> {
+        Arc::new_cyclic(|weak_self| {
+            let callbacks = vk::AllocationCallbacks {
+                p_user_data: weak_self.as_ptr() as *mut c_void,
+                pfn_allocation: Some(Self::allocate),
+                pfn_reallocation: Some(Self::reallocate),
+                pfn_free: Some(Self::free),
+                pfn_internal_allocation: Some(Self::vulkan_internal_allocation_nofication),
+                pfn_internal_free: Some(Self::vulkan_internal_free_nofication),
+                _marker: PhantomData,
+            };
 
-    pub fn get_allocation_callbacks<'a>(&'a mut self) -> vk::AllocationCallbacks<'a> {
-        vk::AllocationCallbacks {
-            p_user_data: self as *mut VulkanAllocator as *mut c_void,
-            pfn_allocation: Some(Self::allocate),
-            pfn_reallocation: Some(Self::reallocate),
-            pfn_free: Some(Self::vulkan_free),
-            pfn_internal_allocation: Some(Self::vulkan_internal_allocation_nofication),
-            pfn_internal_free: Some(Self::vulkan_internal_free_nofication),
-            _marker: PhantomData,
-        }
+            VulkanAllocator {
+                memory_layouts: Mutex::new(HashMap::new()),
+                allocator: allocator.clone(),
+                callbacks,
+                name: name.to_owned(),
+            }
+        })
     }
 
     extern "system" fn allocate(
@@ -42,8 +49,10 @@ impl VulkanAllocator {
             return ptr::null_mut();
         }
 
+        let allocator = unsafe { &mut (*(p_user_data as *mut VulkanAllocator)) };
+
         let layout = Layout::from_size_align(size, alignment).unwrap();
-        let result = Global.allocate(layout);
+        let result = allocator.allocator.allocate(layout);
 
         if result.is_err() {
             error!("failed to allocate");
@@ -51,12 +60,11 @@ impl VulkanAllocator {
         }
 
         let p_memory = result.unwrap().as_ptr() as *mut c_void;
-
-        unsafe {
-            (*(p_user_data as *mut VulkanAllocator))
-                .memory_layouts
-                .insert(p_memory, layout);
-        }
+        allocator
+            .memory_layouts
+            .lock()
+            .unwrap()
+            .insert(p_memory, layout);
 
         trace!("alloc {:?} size={}, align={}", p_memory, size, alignment);
         p_memory
@@ -74,14 +82,17 @@ impl VulkanAllocator {
         }
 
         if size == 0 {
+            Self::free(p_user_data, p_original);
             return ptr::null_mut();
         }
 
-        let result = unsafe {
-            (*(p_user_data as *mut VulkanAllocator))
-                .memory_layouts
-                .get(&p_original)
-        };
+        let allocator = unsafe { &mut (*(p_user_data as *mut VulkanAllocator)) };
+        let result = allocator
+            .memory_layouts
+            .lock()
+            .unwrap()
+            .get(&p_original)
+            .cloned();
 
         if result.is_none() {
             error!("failed to find memory block {:?} for realloc", p_original);
@@ -100,7 +111,7 @@ impl VulkanAllocator {
             return ptr::null_mut();
         }
 
-        trace!("for realloc:");
+        trace!("doing alloc for realloc original={:?}", p_original);
         let p_memory = Self::allocate(p_user_data, size, alignment, allocation_scope);
 
         if p_memory.is_null() {
@@ -109,20 +120,25 @@ impl VulkanAllocator {
         }
 
         unsafe {
-            ptr::copy_nonoverlapping(p_original, p_memory, original_layout.size());
-            Self::vulkan_free(p_user_data, p_original);
+            ptr::copy_nonoverlapping(p_original, p_memory, min(original_layout.size(), size));
+            Self::free(p_user_data, p_original);
         }
 
         p_memory
     }
 
-    extern "system" fn vulkan_free(p_user_data: *mut c_void, p_memory: *mut c_void) {
+    extern "system" fn free(p_user_data: *mut c_void, p_memory: *mut c_void) {
         if p_memory.is_null() {
             return;
         }
 
         let allocator = unsafe { &mut *(p_user_data as *mut VulkanAllocator) };
-        let result = allocator.memory_layouts.get(&p_memory);
+        let result = allocator
+            .memory_layouts
+            .lock()
+            .unwrap()
+            .get(&p_memory)
+            .cloned();
 
         if result.is_none() {
             error!("failed to find memory block {:?} for free", p_memory);
@@ -132,10 +148,12 @@ impl VulkanAllocator {
         let layout = result.unwrap().clone();
 
         unsafe {
-            Global.deallocate(NonNull::new(p_memory as *mut u8).unwrap(), layout);
+            allocator
+                .allocator
+                .deallocate(NonNull::new(p_memory as *mut u8).unwrap(), layout);
         }
 
-        allocator.memory_layouts.remove(&p_memory);
+        allocator.memory_layouts.lock().unwrap().remove(&p_memory);
 
         trace!(
             "free {:?} size={}, align={}",

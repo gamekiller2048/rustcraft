@@ -182,23 +182,23 @@ pub const INDICES: [u16; 36] = [
 //     let buffer_memory_barriers: [vk::BufferMemoryBarrier; 2] =
 //         [vertex_buffer_memory_barrier, index_buffer_memory_barrier];
 
-//     let texture_image_memory_barrier = vk::ImageMemoryBarrier {
-//         s_type: vk::StructureType::BUFFER_MEMORY_BARRIER,
-//         p_next: ptr::null(),
-//         src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-//         dst_access_mask: vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-//         src_queue_family_index: transfer_queue.family_index,
-//         dst_queue_family_index: graphics_queue.family_index,
-//         old_layout: vk::
-//         ..Default::default()
-//     };
+    // let texture_image_memory_barrier = vk::ImageMemoryBarrier {
+    //     s_type: vk::StructureType::BUFFER_MEMORY_BARRIER,
+    //     p_next: ptr::null(),
+    //     src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+    //     dst_access_mask: vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+    //     src_queue_family_index: transfer_queue.family_index,
+    //     dst_queue_family_index: graphics_queue.family_index,
+    //     old_layout: vk::
+    //     ..Default::default()
+    // };
 
-//     transfer_command_buffer.pipeline_barrier(
-//         &context,
-//         vk::PipelineStageFlags::TRANSFER,
-//         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-//         &[],
-//         &buffer_memory_barriers,
-//         &[],
-//     );
+    // transfer_command_buffer.pipeline_barrier(
+    //     &context,
+    //     vk::PipelineStageFlags::TRANSFER,
+    //     vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+    //     &[],
+    //     &buffer_memory_barriers,
+    //     &[],
+    // );
 // }

@@ -1,6 +1,5 @@
 use ash::vk;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -11,13 +10,12 @@ impl Semaphore {
     pub fn destroy_semaphore(
         context: &VulkanContext,
         semaphore: vk::Semaphore,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_semaphore(
-                semaphore,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_semaphore(semaphore, Some(&allocator.callbacks));
         }
     }
 }

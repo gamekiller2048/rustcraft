@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -18,7 +18,7 @@ impl RenderPass {
         dependencies: &[vk::SubpassDependency],
         color_attachment_index: u32,
         depth_attachment_index: u32,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let render_pass =
             Self::create_render_pass(context, attachments, subpasses, dependencies, allocator);
@@ -30,7 +30,7 @@ impl RenderPass {
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Arc<VulkanAllocator>) {
         Self::destroy_render_pass(context, self.render_pass, allocator);
     }
 
@@ -39,7 +39,7 @@ impl RenderPass {
         attachments: &[vk::AttachmentDescription],
         subpasses: &[vk::SubpassDescription],
         dependencies: &[vk::SubpassDependency],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> vk::RenderPass {
         let render_pass_create_info = vk::RenderPassCreateInfo {
             s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
@@ -51,16 +51,13 @@ impl RenderPass {
             p_subpasses: subpasses.as_ptr(),
             p_dependencies: dependencies.as_ptr(),
             dependency_count: dependencies.len() as u32,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
             context
                 .device
-                .create_render_pass(
-                    &render_pass_create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_render_pass(&render_pass_create_info, Some(&allocator.callbacks))
                 .unwrap()
         }
     }
@@ -68,13 +65,12 @@ impl RenderPass {
     pub fn destroy_render_pass(
         context: &VulkanContext,
         render_pass: vk::RenderPass,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_render_pass(
-                render_pass,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_render_pass(render_pass, Some(&allocator.callbacks));
         }
     }
 }

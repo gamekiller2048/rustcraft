@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -15,7 +15,7 @@ impl ImageView {
         format: vk::Format,
         view_type: vk::ImageViewType,
         subresource_range: vk::ImageSubresourceRange,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> vk::ImageView {
         let create_info = vk::ImageViewCreateInfo {
             s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
@@ -31,16 +31,13 @@ impl ImageView {
                 a: vk::ComponentSwizzle::A,
             },
             subresource_range: subresource_range,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
             context
                 .device
-                .create_image_view(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_image_view(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         }
     }
@@ -48,13 +45,12 @@ impl ImageView {
     pub fn destroy_image_view(
         context: &VulkanContext,
         image_view: vk::ImageView,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_image_view(
-                image_view,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_image_view(image_view, Some(&allocator.callbacks));
         }
     }
 
@@ -64,7 +60,7 @@ impl ImageView {
         format: vk::Format,
         view_type: vk::ImageViewType,
         subresource_range: vk::ImageSubresourceRange,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let image_view = Self::create_image_view(
             context,
@@ -78,7 +74,7 @@ impl ImageView {
         Self { image_view }
     }
 
-    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Arc<VulkanAllocator>) {
         Self::destroy_image_view(context, self.image_view, allocator);
     }
 }

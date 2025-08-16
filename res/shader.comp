@@ -1,4 +1,25 @@
 #version 450
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+
+struct Particle {
+  vec3 pos;
+  vec3 vel;
+  vec3 color;
+};
+
+layout(std430, binding = 0) readonly buffer ParticleSSBOIn {
+   Particle particlesIn[];
+};
+
+layout(std430, binding = 1) buffer ParticleSSBOOut {
+   Particle particlesOut[];
+};
 
 void main() {
+   uint index = gl_GlobalInvocationID.x;  
+   Particle particleIn = particlesIn[index];
+
+   particlesOut[index].pos = particlesIn[index].pos + particlesIn[index].vel;
+  //  particlesOut[index].vel += vec3(0, 0.00001, 0);
 }

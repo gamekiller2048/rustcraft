@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::vulkan_allocator::VulkanAllocator;
 use crate::vulkan_context::VulkanContext;
@@ -10,7 +10,7 @@ impl ShaderModule {
     pub fn create_shader_module(
         context: &VulkanContext,
         bytes: &Vec<u8>,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> vk::ShaderModule {
         let create_info = vk::ShaderModuleCreateInfo {
             s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
@@ -18,16 +18,13 @@ impl ShaderModule {
             flags: vk::ShaderModuleCreateFlags::empty(),
             code_size: bytes.len(),
             p_code: bytes.as_ptr() as *const u32,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
             context
                 .device
-                .create_shader_module(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_shader_module(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         }
     }
@@ -35,13 +32,12 @@ impl ShaderModule {
     pub fn destroy_shader_module(
         context: &VulkanContext,
         shader: vk::ShaderModule,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.device.destroy_shader_module(
-                shader,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .device
+                .destroy_shader_module(shader, Some(&allocator.callbacks));
         }
     }
 }

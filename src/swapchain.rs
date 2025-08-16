@@ -1,5 +1,5 @@
 use ash::vk;
-use std::{cell::RefCell, ptr, rc::Rc};
+use std::{marker::PhantomData, ptr, sync::Arc};
 
 use crate::framebuffer::Framebuffer;
 use crate::image::Image;
@@ -42,7 +42,7 @@ impl Swapchain {
         graphics_queue_index: u32,
         present_queue_index: u32,
         render_pass: &RenderPass,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Self {
         let queue_family_indices: [u32; 2] = [graphics_queue_index, present_queue_index];
 
@@ -98,9 +98,9 @@ impl Swapchain {
         }
     }
 
-    pub fn destroy(&self, context: &VulkanContext, allocator: &Rc<RefCell<VulkanAllocator>>) {
+    pub fn destroy(&self, context: &VulkanContext, allocator: &Arc<VulkanAllocator>) {
         for framebuffer in self.framebuffers.iter() {
-            Framebuffer::destroy_framebuffer(&context, *framebuffer, allocator);
+            Framebuffer::destroy_framebuffer(context, *framebuffer, allocator);
         }
 
         for image_view in self.image_views.iter() {
@@ -110,8 +110,8 @@ impl Swapchain {
         Self::destroy_swapchain(context, self.swapchain, allocator);
 
         ImageView::destroy_image_view(context, self.depth_image_view, allocator);
-        Image::destroy_image(&context, self.depth_image, allocator);
-        context.free_memory(self.depth_image_memory);
+        Image::destroy_image(context, self.depth_image, allocator);
+        context.free_memory(self.depth_image_memory, allocator);
     }
 
     pub fn recreate(
@@ -123,7 +123,7 @@ impl Swapchain {
         extent: vk::Extent2D,
         swapchain_details: &SwapChainSupportDetails,
         render_pass: &RenderPass,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         self.format = format;
         self.present_mode = present_mode;
@@ -131,7 +131,8 @@ impl Swapchain {
 
         let queue_family_indices: [u32; 2] = [self.graphics_queue_index, self.present_queue_index];
 
-        let old_swapchain = self.swapchain;
+        // let old_swapchain = self.swapchain;
+        Self::destroy_swapchain(context, self.swapchain, allocator);
 
         (self.swapchain, self.images) = Self::create_swapchain(
             context,
@@ -142,11 +143,9 @@ impl Swapchain {
             swapchain_details,
             self.sharing_mode,
             &queue_family_indices,
-            old_swapchain,
+            vk::SwapchainKHR::null(), // TODO: use this
             allocator,
         );
-
-        Self::destroy_swapchain(context, old_swapchain, allocator);
 
         for image_view in self.image_views.iter() {
             ImageView::destroy_image_view(context, *image_view, allocator);
@@ -156,8 +155,8 @@ impl Swapchain {
             Self::create_image_views(context, &self.images, self.format.format, allocator);
 
         ImageView::destroy_image_view(context, self.depth_image_view, allocator);
-        Image::destroy_image(&context, self.depth_image, &allocator);
-        context.free_memory(self.depth_image_memory);
+        Image::destroy_image(context, self.depth_image, allocator);
+        context.free_memory(self.depth_image_memory, allocator);
 
         (
             self.depth_image,
@@ -174,7 +173,7 @@ impl Swapchain {
         );
 
         for framebuffer in self.framebuffers.iter() {
-            Framebuffer::destroy_framebuffer(&context, *framebuffer, allocator);
+            Framebuffer::destroy_framebuffer(context, *framebuffer, allocator);
         }
 
         self.framebuffers = Self::create_framebuffers(
@@ -194,10 +193,10 @@ impl Swapchain {
         depth_format: vk::Format,
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
         let (depth_image, depth_image_memory) = Image::create_image(
-            &context,
+            context,
             extent.width,
             extent.height,
             1,
@@ -234,7 +233,7 @@ impl Swapchain {
         context: &VulkanContext,
         images: &Vec<vk::Image>,
         format: vk::Format,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Vec<vk::ImageView> {
         let mut image_views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
 
@@ -264,7 +263,7 @@ impl Swapchain {
         image_views: &Vec<vk::ImageView>,
         depth_image_view: vk::ImageView,
         render_pass: &RenderPass,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> Vec<vk::Framebuffer> {
         let mut framebuffers = Vec::with_capacity(image_views.len());
 
@@ -275,7 +274,7 @@ impl Swapchain {
             attachments[render_pass.depth_attachment_index as usize] = depth_image_view;
 
             framebuffers.push(Framebuffer::create_framebuffer(
-                &context,
+                context,
                 render_pass.render_pass,
                 &attachments,
                 extent,
@@ -297,7 +296,7 @@ impl Swapchain {
         sharing_mode: vk::SharingMode,
         queue_family_indices: &[u32],
         old_swapchain: vk::SwapchainKHR,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>) {
         let mut image_count: u32 = swapchain_details.capabilities.min_image_count + 1;
         if image_count > swapchain_details.capabilities.max_image_count {
@@ -323,16 +322,13 @@ impl Swapchain {
             image_sharing_mode: sharing_mode,
             queue_family_index_count: queue_family_indices.len() as u32,
             p_queue_family_indices: queue_family_indices.as_ptr(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         let swapchain: vk::SwapchainKHR = unsafe {
             context
                 .swapchain_loader
-                .create_swapchain(
-                    &create_info,
-                    Some(&allocator.borrow_mut().get_allocation_callbacks()),
-                )
+                .create_swapchain(&create_info, Some(&allocator.callbacks))
                 .unwrap()
         };
 
@@ -349,13 +345,12 @@ impl Swapchain {
     pub fn destroy_swapchain(
         context: &VulkanContext,
         swapchain: vk::SwapchainKHR,
-        allocator: &Rc<RefCell<VulkanAllocator>>,
+        allocator: &Arc<VulkanAllocator>,
     ) {
         unsafe {
-            context.swapchain_loader.destroy_swapchain(
-                swapchain,
-                Some(&allocator.borrow_mut().get_allocation_callbacks()),
-            );
+            context
+                .swapchain_loader
+                .destroy_swapchain(swapchain, Some(&allocator.callbacks));
         }
     }
 }

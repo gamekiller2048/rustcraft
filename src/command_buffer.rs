@@ -1,5 +1,5 @@
 use ash::vk;
-use std::ptr;
+use std::{marker::PhantomData, ptr};
 
 use super::vulkan_context::VulkanContext;
 
@@ -30,7 +30,7 @@ impl CommandBuffer {
             command_pool: command_pool,
             level: level,
             command_buffer_count: num_buffers,
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
@@ -56,7 +56,7 @@ impl CommandBuffer {
             p_next: ptr::null(),
             flags: flags,
             p_inheritance_info: ptr::null(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
@@ -93,7 +93,7 @@ impl CommandBuffer {
             render_area: *render_area,
             clear_value_count: clear_values.len() as u32,
             p_clear_values: clear_values.as_ptr(),
-            ..Default::default()
+            _marker: PhantomData,
         };
 
         unsafe {
@@ -111,14 +111,12 @@ impl CommandBuffer {
         &self,
         context: &VulkanContext,
         pipeline_bind_point: vk::PipelineBindPoint,
-        graphics_pipeline: vk::Pipeline,
+        pipeline: vk::Pipeline,
     ) {
         unsafe {
-            context.device.cmd_bind_pipeline(
-                self.command_buffer,
-                pipeline_bind_point,
-                graphics_pipeline,
-            );
+            context
+                .device
+                .cmd_bind_pipeline(self.command_buffer, pipeline_bind_point, pipeline);
         }
     }
 
