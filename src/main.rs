@@ -184,6 +184,11 @@ struct Renderer {
     camera_pos: glm::Vec3,
     camera_orientation: glm::Vec3,
     last_mouse: glm::Vec2,
+    camera_speed: f32,
+    camera_rotation_speed: f32,
+    fps: u32,
+    fps_timer: Duration,
+    fps_counter: u32,
 }
 
 impl Renderer {
@@ -831,6 +836,13 @@ impl Renderer {
             camera_pos: glm::vec3(0.0, 0.0, -50.5),
             camera_orientation: glm::vec3(0.0, 0.0, 1.0).normalize(),
             last_mouse: glm::vec2(0.0, 0.0),
+            camera_speed: 0.05,
+            camera_rotation_speed: 0.01,
+            fps_timer: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap(),
+            fps: 0,
+            fps_counter: 0,
         }
     }
 
@@ -975,29 +987,44 @@ impl Renderer {
         window: &winit::window::Window,
         window_resized: bool,
     ) {
+        self.fps_counter += 1;
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+
+        if (now - self.fps_timer).as_millis() >= 100 {
+            self.fps = self.fps_counter * 10;
+            self.fps_timer = now;
+            self.fps_counter = 0;
+            println!("{} fps", self.fps);
+        }
+
         if key_map[KeyCode::KeyW as usize] {
-            self.camera_pos += self.camera_orientation * 0.01;
+            self.camera_pos += self.camera_orientation * self.camera_speed;
         }
         if key_map[KeyCode::KeyS as usize] {
-            self.camera_pos -= self.camera_orientation * 0.01;
+            self.camera_pos -= self.camera_orientation * self.camera_speed;
         }
         if key_map[KeyCode::KeyA as usize] {
-            self.camera_pos -= self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)) * 0.01;
+            self.camera_pos -=
+                self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)) * self.camera_speed;
         }
         if key_map[KeyCode::KeyD as usize] {
-            self.camera_pos += self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)) * 0.01;
+            self.camera_pos +=
+                self.camera_orientation.cross(&glm::vec3(0.0, 1.0, 0.0)) * self.camera_speed;
         }
         if key_map[KeyCode::Space as usize] {
-            self.camera_pos -= glm::vec3(0.0, 1.0, 0.0) * 0.01;
+            self.camera_pos -= glm::vec3(0.0, 1.0, 0.0) * self.camera_speed;
         }
         if key_map[KeyCode::ShiftLeft as usize] {
-            self.camera_pos += glm::vec3(0.0, 1.0, 0.0) * 0.01;
+            self.camera_pos += glm::vec3(0.0, 1.0, 0.0) * self.camera_speed;
         }
 
         if mouse_map[0] {
             let mut diff = mouse_pos - self.last_mouse;
             if diff.magnitude() > 0.0 {
-                diff = diff.normalize() * 0.01;
+                diff = diff.normalize() * self.camera_rotation_speed;
 
                 self.camera_orientation = glm::rotate_vec3(
                     &self.camera_orientation,
@@ -1517,7 +1544,6 @@ impl Renderer {
                 ..Default::default()
             });
         }
-        println!("{:?}", particles[0]);
 
         particles
     }
@@ -1718,7 +1744,6 @@ impl winit::application::ApplicationHandler for App {
 }
 
 fn main() {
-    println!("{}", size_of::<Particle>());
     env_logger::init();
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
